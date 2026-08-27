@@ -12,9 +12,15 @@ correct as `cswap` evolves.
 
 ## Requirements
 
-- Windows 10 or 11
+- Windows 11. Developed and tested there only. It is built on Tauri, which
+  needs the WebView2 Runtime; Windows 11 ships that preinstalled, Windows 10
+  does not always. Windows 10 may well work once WebView2 is installed, but
+  nobody has run it there, so this does not claim it does.
 - `cswap` on `PATH`, or installed at `%USERPROFILE%\.local\bin\cswap.exe`
 - At least one account registered with `cswap add`
+
+The menu's action labels are English. Everything else the app says — usage
+status, staleness, and every error message — is Korean.
 
 ## Install
 
@@ -32,10 +38,12 @@ The tray icon's menu lists every managed account with its 5-hour and 7-day
 usage. Click one to switch. `Rotate` moves to the next account; `Best Quota`
 jumps to the one with the most headroom.
 
-Usage refreshes every five minutes and whenever you click `Refresh now`.
-`Open Dashboard` launches `cswap tui` in a new console window.
+Usage refreshes every five minutes, whenever you open the tray menu, and
+whenever you click `Refresh now`. `Open Dashboard` launches `cswap tui` in a
+new console window.
 
 `Start with Windows` registers the app under the current user's `Run` key.
+Uninstalling removes that value.
 
 ## Development
 
