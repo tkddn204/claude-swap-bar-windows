@@ -33,16 +33,38 @@ struct State {
     pending: bool,
 }
 
-/// Clears the in-flight flag on every exit path, including a panic.
+/// Clears the in-flight flag if a refresh unwinds.
 ///
 /// Without this, a panic inside the fetch would leave `busy` stuck true and
 /// silently freeze every future refresh — the tooltip would stop changing and
 /// `Refresh now` would do nothing, with no symptom visible from the tray.
-struct BusyGuard(Shared);
+///
+/// On the normal path `refresh` clears the flag itself, under the same lock it
+/// uses to decide it is finished, and then disarms this guard. Letting the
+/// guard clear the flag on that path instead would open a window: another
+/// refresh could claim the flag in between, and this guard would then clear a
+/// flag it no longer owns, admitting two concurrent `cswap list` calls.
+struct BusyGuard {
+    state: Shared,
+    armed: bool,
+}
+
+impl BusyGuard {
+    fn new(state: Shared) -> Self {
+        Self { state, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
 
 impl Drop for BusyGuard {
     fn drop(&mut self) {
-        let mut guard = match self.0.lock() {
+        if !self.armed {
+            return;
+        }
+        let mut guard = match self.state.lock() {
             Ok(guard) => guard,
             // The payload is plain data, so a poisoned lock is still usable
             // and clearing the flag matters more than propagating the panic.
@@ -204,19 +226,29 @@ fn refresh(app: &AppHandle, state: &Shared) {
         }
         guard.busy = true;
     }
-    // Cleared on every exit path below, panics included.
-    let _busy = BusyGuard(state.clone());
+    let mut busy = BusyGuard::new(state.clone());
 
     loop {
         // Re-resolve the executable while we have none: `cswap` may have been
         // installed since startup, and the alternative is showing "not found"
         // until the app is restarted.
-        let exe = {
-            let mut guard = state.lock().unwrap();
-            if guard.exe.is_none() {
-                guard.exe = cswap::find_exe();
-            }
+        //
+        // `find_exe` spawns a process to probe, and that probe has no timeout,
+        // so it must never run under the lock — a wedged probe would hold the
+        // state mutex indefinitely and freeze every menu interaction behind it.
+        let known = {
+            let guard = state.lock().unwrap();
             guard.exe.clone()
+        };
+        let exe = match known {
+            Some(exe) => Some(exe),
+            None => {
+                let found = cswap::find_exe();
+                if found.is_some() {
+                    state.lock().unwrap().exe = found.clone();
+                }
+                found
+            }
         };
 
         let outcome = match exe {
@@ -224,7 +256,7 @@ fn refresh(app: &AppHandle, state: &Shared) {
             None => Err(CswapError::NotFound),
         };
 
-        let again = {
+        {
             let mut guard = state.lock().unwrap();
             match outcome {
                 Ok(list) => {
@@ -237,12 +269,19 @@ fn refresh(app: &AppHandle, state: &Shared) {
                     guard.error = Some(err.summary());
                 }
             }
-            std::mem::take(&mut guard.pending)
-        };
+        }
 
         render(app, state);
 
-        if !again {
+        // Read `pending` AFTER rendering, and clear `busy` in the same lock
+        // acquisition that decides to stop. Reading it earlier would lose a
+        // request that arrived while `render` was running, and clearing the
+        // flag in a separate step would let a request slip into the gap and
+        // then be discarded by this refresh.
+        let mut guard = state.lock().unwrap();
+        if !std::mem::take(&mut guard.pending) {
+            guard.busy = false;
+            busy.disarm();
             break;
         }
     }
