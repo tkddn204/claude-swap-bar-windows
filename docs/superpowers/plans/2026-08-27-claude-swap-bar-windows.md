@@ -2234,7 +2234,43 @@ fn open_dashboard_spawns_without_waiting_for_the_child() {
 Run: `cargo test --test cswap_process open_dashboard`
 Expected: FAIL with `cannot find function open_dashboard in module cswap`.
 
-- [ ] **Step 3: Implement `open_dashboard`**
+- [ ] **Step 3: Give the executable probe a deadline**
+
+`find_exe`'s `probe` is the one path in `cswap.rs` that waits on a child with
+no timeout. That was survivable when it ran only at startup, but Task 5 also
+calls `find_exe` from the refresh loop while no executable is known — and a
+probe that hangs there parks the refresh thread with the in-flight flag stuck
+set, so every later refresh coalesces into a pending request nothing will ever
+consume and the tray freezes permanently instead of showing an error.
+
+Route it through `run_owned` so it inherits the same 10-second deadline.
+Replace `probe` in `src/cswap.rs` with:
+
+```rust
+/// Whether `name` can be run.
+///
+/// Routed through `run_owned` rather than calling `Command::status()`, so it
+/// inherits the 10-second deadline. An unbounded wait here would park the
+/// refresh thread forever with the in-flight flag set, freezing the tray
+/// rather than surfacing an error.
+fn probe(name: &str) -> bool {
+    run_owned(Path::new(name), &["--version".to_string()]).is_ok()
+}
+```
+
+`Stdio` is no longer referenced by `probe`; leave the import if `run_owned`
+still uses it, and remove it if the compiler says it is now unused.
+
+- [ ] **Step 4: Confirm the probe still resolves the real executable**
+
+Run: `cargo test --test cswap_process`
+Expected: PASS, 10 tests — `a_missing_executable_is_not_found` still passes,
+which exercises the spawn-failure path `probe` depends on.
+
+The positive case is covered by the app itself: with `cswap` installed,
+launching the binary must still fetch accounts. That is checked in Step 10.
+
+- [ ] **Step 5: Implement `open_dashboard`**
 
 Append to `src/cswap.rs`:
 
@@ -2257,12 +2293,12 @@ pub fn open_dashboard(exe: &Path) -> Result<(), CswapError> {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [ ] **Step 6: Run the test to verify it passes**
 
 Run: `cargo test --test cswap_process`
 Expected: PASS, 11 tests.
 
-- [ ] **Step 5: Wire the menu item**
+- [ ] **Step 7: Wire the menu item**
 
 In `src/main.rs`, replace the `"dashboard"` arm of `on_menu_event`:
 
@@ -2279,7 +2315,7 @@ In `src/main.rs`, replace the `"dashboard"` arm of `on_menu_event`:
         }
 ```
 
-- [ ] **Step 6: Write `README.md`**
+- [ ] **Step 8: Write `README.md`**
 
 ```markdown
 # Claude Swap Bar for Windows
@@ -2335,7 +2371,7 @@ The tray icon is static. Usage and error state appear only in the tooltip and
 the menu.
 ```
 
-- [ ] **Step 7: Build the release bundle**
+- [ ] **Step 9: Build the release bundle**
 
 Run: `cargo tauri build`
 
@@ -2347,14 +2383,14 @@ cargo install tauri-cli --version "^2"
 
 Expected: an NSIS installer under `target/release/bundle/nsis/` and a standalone `target/release/claude-swap-bar.exe`.
 
-- [ ] **Step 8: Verify the packaged build**
+- [ ] **Step 10: Verify the packaged build**
 
 1. Run `target/release/claude-swap-bar.exe` directly. The tray icon appears with no console window.
 2. Check the executable's icon in Explorer: it shows the orange double-arrow, not the default Rust or Tauri icon.
 3. Install from the NSIS installer, launch from the Start menu, and confirm switching works.
 4. Uninstall.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add src/cswap.rs src/main.rs tests/cswap_process.rs README.md
