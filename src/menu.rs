@@ -4,7 +4,16 @@ use crate::model::{Account, ListResponse};
 /// terminator. We budget in characters, which is conservative enough.
 pub const TOOLTIP_MAX: usize = 127;
 
-/// A snapshot older than this is called out rather than shown as if current.
+/// How old `cswap`'s own usage numbers may be before we call them out rather
+/// than showing them as if current.
+///
+/// This is deliberately not measured against our own fetch clock. Our clock
+/// only advances on a successful `cswap list`, and every failure sets an error
+/// that outranks this message — so a threshold on our clock could never fire.
+/// `cswap` tells us how stale its cached usage is per account
+/// (`usageAgeSeconds`), and that is the number spec section 8's
+/// "사용량 조회 실패, 계정 목록은 유효" row is about: the account list came back
+/// fine, the usage hanging off it did not.
 pub const STALE_AFTER_SECS: u64 = 600;
 
 /// Everything the menu needs, with no clock or process dependency, so the
@@ -12,7 +21,9 @@ pub const STALE_AFTER_SECS: u64 = 600;
 pub struct View<'a> {
     /// The most recent successful snapshot, if we ever got one.
     pub snapshot: Option<&'a ListResponse>,
-    /// Seconds since that snapshot was taken.
+    /// Seconds since that snapshot was taken. Drives the `Refresh now`
+    /// freshness label only; staleness of the numbers themselves comes from
+    /// `usageAgeSeconds` in the snapshot.
     pub age_secs: Option<u64>,
     /// A refresh error that is still current.
     pub error: Option<&'a str>,
@@ -52,15 +63,29 @@ pub fn build(view: &View) -> MenuModel {
     }
 }
 
+/// Marks an account `cswap disable` has held out of automatic rotation.
+///
+/// Spec section 7 asks for such an account to be greyed out yet still
+/// clickable. A native `CheckMenuItem` cannot be both — greying it is exactly
+/// what makes it unclickable — so the marker is textual. "자동 제외" says what
+/// `cswap disable` actually did; a bare "비활성" would collide with the other
+/// meaning of inactive on this menu, which the radio check already carries.
+const DISABLED_MARK: &str = "(자동 제외)";
+
 fn account_row(account: &Account) -> AccountRow {
+    let mut label = format!(
+        "{}  {}   {}",
+        account.number,
+        account.display_name(),
+        row_detail(account)
+    );
+    if account.disabled {
+        label.push_str("  ");
+        label.push_str(DISABLED_MARK);
+    }
     AccountRow {
         id: format!("acct:{}", account.number),
-        label: format!(
-            "{}  {}   {}",
-            account.number,
-            account.display_name(),
-            row_detail(account)
-        ),
+        label,
         checked: account.active,
         // Disabled accounts are held out of auto-rotation but can still be
         // switched to by hand, so they stay clickable.
@@ -96,13 +121,27 @@ fn notice_line(view: &View) -> Option<String> {
     if let Some(error) = view.error {
         return Some(error.to_string());
     }
-    match (view.snapshot, view.age_secs) {
-        (Some(s), _) if s.accounts.is_empty() => Some("등록된 계정 없음".to_string()),
-        (Some(_), Some(age)) if age >= STALE_AFTER_SECS => {
-            Some(format!("사용량 정보 오래됨 ({})", ago(age)))
-        }
-        _ => None,
+    let snapshot = view.snapshot?;
+    if snapshot.accounts.is_empty() {
+        return Some("등록된 계정 없음".to_string());
     }
+    stale_usage_age(snapshot).map(|age| format!("사용량 정보 오래됨 ({})", ago(age)))
+}
+
+/// How old `cswap` says the active account's usage numbers are, but only once
+/// they have crossed `STALE_AFTER_SECS`.
+///
+/// Reported per account; we speak for the active one, since that is the account
+/// whose numbers the tooltip and the notice are describing.
+fn stale_usage_age(snapshot: &ListResponse) -> Option<u64> {
+    let account = snapshot.accounts.iter().find(|a| a.active)?;
+    let secs = account.usage_age_seconds?;
+    // A negative or non-finite age is cswap telling us something we cannot use;
+    // saying nothing beats inventing a duration from it.
+    if !secs.is_finite() || secs < STALE_AFTER_SECS as f64 {
+        return None;
+    }
+    Some(secs as u64)
 }
 
 fn refresh_label(age_secs: Option<u64>) -> String {
@@ -139,17 +178,11 @@ fn tooltip(view: &View) -> String {
         return "등록된 계정 없음".to_string();
     };
 
-    let stale = view
-        .age_secs
-        .map(|age| age >= STALE_AFTER_SECS)
-        .unwrap_or(false);
-
     let mut lines = Vec::new();
     let head = format!("{} (#{})", account.display_name(), account.number);
-    lines.push(if stale {
-        format!("{head}  ({})", ago(view.age_secs.unwrap_or(0)))
-    } else {
-        head
+    lines.push(match stale_usage_age(snapshot) {
+        Some(age) => format!("{head}  ({})", ago(age)),
+        None => head,
     });
 
     if let Some(note) = account.status_note() {
@@ -222,6 +255,18 @@ mod tests {
     const MINIMAL: &str = include_str!("../tests/fixtures/list_minimal.json");
     const EMPTY: &str = include_str!("../tests/fixtures/list_empty.json");
 
+    /// Spec section 8's "사용량 조회 실패, 계정 목록은 유효" row: cswap answered
+    /// with a perfectly good account list, but the usage numbers hanging off it
+    /// are twelve minutes old because cswap could not refresh them.
+    const STALE_USAGE: &str = r#"{"schemaVersion":1,"activeAccountNumber":2,
+        "accounts":[
+          {"number":1,"email":"work@example.com","active":false,
+           "usageStatus":"ok","usageAgeSeconds":720.0,
+           "usage":{"fiveHour":{"pct":0.0},"sevenDay":{"pct":12.0}}},
+          {"number":2,"email":"personal@example.com","active":true,
+           "usageStatus":"ok","usageAgeSeconds":720.0,
+           "usage":{"fiveHour":{"pct":25.0},"sevenDay":{"pct":55.0}}}]}"#;
+
     fn view_of(json: &str) -> ListResponse {
         ListResponse::parse(json).unwrap()
     }
@@ -259,8 +304,40 @@ mod tests {
             error: None,
             notice: None,
         });
-        assert_eq!(model.accounts[0].label, "3  bot   rate_limited");
+        assert_eq!(model.accounts[0].label, "3  bot   rate_limited  (자동 제외)");
         assert!(model.accounts[0].checked);
+    }
+
+    #[test]
+    fn a_disabled_account_is_marked_yet_stays_clickable() {
+        // MINIMAL's only account carries `"disabled": true`.
+        let list = view_of(MINIMAL);
+        let model = build(&View {
+            snapshot: Some(&list),
+            age_secs: Some(0),
+            error: None,
+            notice: None,
+        });
+        assert!(
+            model.accounts[0].label.ends_with("(자동 제외)"),
+            "label was {:?}",
+            model.accounts[0].label
+        );
+        assert!(
+            model.accounts[0].enabled,
+            "spec 7: a disabled account is excluded from rotation, not from the menu"
+        );
+
+        // An account cswap has not disabled carries no marker.
+        let list = view_of(TWO);
+        let model = build(&View {
+            snapshot: Some(&list),
+            age_secs: Some(0),
+            error: None,
+            notice: None,
+        });
+        assert!(!model.accounts[0].label.contains("자동 제외"));
+        assert!(!model.accounts[1].label.contains("자동 제외"));
     }
 
     #[test]
@@ -317,11 +394,11 @@ mod tests {
     }
 
     #[test]
-    fn stale_data_is_called_out_in_the_notice() {
-        let list = view_of(TWO);
+    fn usage_cswap_reports_as_stale_is_called_out_in_the_notice() {
+        let list = view_of(STALE_USAGE);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(720),
+            age_secs: Some(3),
             error: None,
             notice: None,
         });
@@ -329,6 +406,41 @@ mod tests {
             model.notice.as_deref(),
             Some("사용량 정보 오래됨 (12분 전)")
         );
+        assert_eq!(
+            model.refresh_label, "Refresh now   · 방금 갱신",
+            "our own fetch is seconds old even though cswap's numbers are not"
+        );
+    }
+
+    #[test]
+    fn our_own_fetch_age_does_not_make_current_usage_look_stale() {
+        // The active account in TWO has `usageAgeSeconds: 1.6`. cswap's numbers
+        // are current; only our clock since the last successful list is old.
+        let list = view_of(TWO);
+        let model = build(&View {
+            snapshot: Some(&list),
+            age_secs: Some(720),
+            error: None,
+            notice: None,
+        });
+        assert_eq!(model.notice, None);
+        assert_eq!(model.refresh_label, "Refresh now   · 12분 전 갱신");
+        assert!(!model.tooltip.contains("12분 전"));
+    }
+
+    #[test]
+    fn usage_age_missing_altogether_is_not_reported_as_stale() {
+        let json = r#"{"schemaVersion":1,"activeAccountNumber":1,
+            "accounts":[{"number":1,"email":"a@example.com","active":true,
+            "usageStatus":"ok","usage":{"fiveHour":{"pct":3.0}}}]}"#;
+        let list = view_of(json);
+        let model = build(&View {
+            snapshot: Some(&list),
+            age_secs: Some(999_999),
+            error: None,
+            notice: None,
+        });
+        assert_eq!(model.notice, None);
     }
 
     #[test]
@@ -422,11 +534,11 @@ mod tests {
     }
 
     #[test]
-    fn the_tooltip_marks_stale_data() {
-        let list = view_of(TWO);
+    fn the_tooltip_marks_usage_cswap_reports_as_stale() {
+        let list = view_of(STALE_USAGE);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(720),
+            age_secs: Some(3),
             error: None,
             notice: None,
         });
