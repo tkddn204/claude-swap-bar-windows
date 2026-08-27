@@ -21,10 +21,6 @@ pub const STALE_AFTER_SECS: u64 = 600;
 pub struct View<'a> {
     /// The most recent successful snapshot, if we ever got one.
     pub snapshot: Option<&'a ListResponse>,
-    /// Seconds since that snapshot was taken. Drives the `Refresh now`
-    /// freshness label only; staleness of the numbers themselves comes from
-    /// `usageAgeSeconds` in the snapshot.
-    pub age_secs: Option<u64>,
     /// A refresh error that is still current.
     pub error: Option<&'a str>,
     /// A one-shot message such as a failed switch. Outranks `error`.
@@ -53,7 +49,6 @@ pub struct MenuModel {
     /// on — so the item exists here and nowhere else.
     pub install_help: bool,
     pub accounts: Vec<AccountRow>,
-    pub refresh_label: String,
     pub tooltip: String,
 }
 
@@ -67,7 +62,6 @@ pub fn build(view: &View) -> MenuModel {
         notice: notice_line(view),
         install_help: view.cswap_missing,
         accounts,
-        refresh_label: refresh_label(view.age_secs),
         tooltip: tooltip(view),
     }
 }
@@ -151,13 +145,6 @@ fn stale_usage_age(snapshot: &ListResponse) -> Option<u64> {
         return None;
     }
     Some(secs as u64)
-}
-
-fn refresh_label(age_secs: Option<u64>) -> String {
-    match age_secs {
-        Some(age) => format!("Refresh now   · {} 갱신", ago(age)),
-        None => "Refresh now".to_string(),
-    }
 }
 
 /// `"방금"`, `"2분 전"`, `"2시간 전"`.
@@ -285,7 +272,6 @@ mod tests {
         let list = view_of(TWO);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(0),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -310,7 +296,6 @@ mod tests {
         let list = view_of(MINIMAL);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(0),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -325,7 +310,6 @@ mod tests {
         let list = view_of(MINIMAL);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(0),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -344,7 +328,6 @@ mod tests {
         let list = view_of(TWO);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(0),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -361,7 +344,6 @@ mod tests {
         let list = view_of(json);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(0),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -374,7 +356,6 @@ mod tests {
         let list = view_of(EMPTY);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(0),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -388,7 +369,6 @@ mod tests {
         let list = view_of(TWO);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(0),
             error: Some("갱신 실패: boom"),
             notice: None,
             cswap_missing: false,
@@ -402,7 +382,6 @@ mod tests {
         let list = view_of(TWO);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(0),
             error: Some("갱신 실패: boom"),
             notice: Some("전환 실패: 잠김"),
             cswap_missing: false,
@@ -415,7 +394,6 @@ mod tests {
         let list = view_of(STALE_USAGE);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(3),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -424,27 +402,22 @@ mod tests {
             model.notice.as_deref(),
             Some("사용량 정보 오래됨 (12분 전)")
         );
-        assert_eq!(
-            model.refresh_label, "Refresh now   · 방금 갱신",
-            "our own fetch is seconds old even though cswap's numbers are not"
-        );
     }
 
     #[test]
-    fn our_own_fetch_age_does_not_make_current_usage_look_stale() {
-        // The active account in TWO has `usageAgeSeconds: 1.6`. cswap's numbers
-        // are current; only our clock since the last successful list is old.
+    fn usage_cswap_reports_as_current_is_not_called_out() {
+        // The active account in TWO has `usageAgeSeconds: 1.6`. Staleness is
+        // cswap's own answer about its cache, so fresh numbers stay unmarked
+        // no matter how long ago this app last managed to fetch them.
         let list = view_of(TWO);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(720),
             error: None,
             notice: None,
             cswap_missing: false,
         });
         assert_eq!(model.notice, None);
-        assert_eq!(model.refresh_label, "Refresh now   · 12분 전 갱신");
-        assert!(!model.tooltip.contains("12분 전"));
+        assert!(!model.tooltip.contains("전)"));
     }
 
     #[test]
@@ -455,7 +428,6 @@ mod tests {
         let list = view_of(json);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(999_999),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -463,39 +435,12 @@ mod tests {
         assert_eq!(model.notice, None);
     }
 
-    #[test]
-    fn the_refresh_label_reports_the_last_successful_update() {
-        let list = view_of(TWO);
-        let at = |secs| {
-            build(&View {
-                snapshot: Some(&list),
-                age_secs: Some(secs),
-                error: None,
-                notice: None,
-                cswap_missing: false,
-            })
-            .refresh_label
-        };
-        assert_eq!(at(5), "Refresh now   · 방금 갱신");
-        assert_eq!(at(120), "Refresh now   · 2분 전 갱신");
-        assert_eq!(at(7200), "Refresh now   · 2시간 전 갱신");
-
-        let never = build(&View {
-            snapshot: None,
-            age_secs: None,
-            error: None,
-            notice: None,
-            cswap_missing: false,
-        });
-        assert_eq!(never.refresh_label, "Refresh now");
-    }
 
     #[test]
     fn the_tooltip_describes_the_active_account() {
         let list = view_of(TWO);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(0),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -518,7 +463,6 @@ mod tests {
         let list = view_of(json);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(0),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -538,7 +482,6 @@ mod tests {
         let list = view_of(json);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(0),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -551,7 +494,6 @@ mod tests {
     fn the_install_guide_is_offered_only_when_cswap_is_missing() {
         let missing = build(&View {
             snapshot: None,
-            age_secs: None,
             error: Some("cswap을 찾을 수 없음"),
             notice: None,
             cswap_missing: true,
@@ -562,7 +504,6 @@ mod tests {
         // Any other failure leaves cswap installed, so the guide would be noise.
         let other_failure = build(&View {
             snapshot: None,
-            age_secs: None,
             error: Some("갱신 실패: 응답 없음 (10초 초과)"),
             notice: None,
             cswap_missing: false,
@@ -572,7 +513,6 @@ mod tests {
         let healthy = view_of(TWO);
         let ok = build(&View {
             snapshot: Some(&healthy),
-            age_secs: Some(0),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -584,7 +524,6 @@ mod tests {
     fn the_tooltip_reports_errors_instead_of_stale_numbers() {
         let model = build(&View {
             snapshot: None,
-            age_secs: None,
             error: Some("cswap을 찾을 수 없음"),
             notice: None,
             cswap_missing: false,
@@ -597,7 +536,6 @@ mod tests {
         let list = view_of(STALE_USAGE);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(3),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -619,7 +557,6 @@ mod tests {
         let list = view_of(json);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(0),
             error: None,
             notice: None,
             cswap_missing: false,
@@ -641,7 +578,6 @@ mod tests {
         let list = view_of(EMPTY);
         let model = build(&View {
             snapshot: Some(&list),
-            age_secs: Some(0),
             error: None,
             notice: None,
             cswap_missing: false,

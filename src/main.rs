@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use claude_swap_bar::cswap::{self, CswapError, Switch};
 use claude_swap_bar::menu::{self, MenuModel, View};
@@ -18,7 +18,6 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 struct State {
     exe: Option<PathBuf>,
     snapshot: Option<ListResponse>,
-    fetched_at: Option<Instant>,
     error: Option<String>,
     /// True while the last attempt could not find `cswap.exe` at all. Kept
     /// apart from `exe`, which can still hold a path to an executable that has
@@ -84,7 +83,6 @@ impl State {
     fn view(&self) -> MenuModel {
         menu::build(&View {
             snapshot: self.snapshot.as_ref(),
-            age_secs: self.fetched_at.map(|t| t.elapsed().as_secs()),
             error: self.error.as_deref(),
             notice: self.notice.as_deref(),
             cswap_missing: self.cswap_missing,
@@ -98,7 +96,6 @@ fn main() {
     let state: Shared = Arc::new(Mutex::new(State {
         exe: cswap::find_exe(),
         snapshot: None,
-        fetched_at: None,
         error: None,
         cswap_missing: false,
         notice: None,
@@ -125,7 +122,7 @@ fn main() {
             let app = app.clone();
             std::thread::spawn(move || {
                 if let Some(state) = app.try_state::<Shared>() {
-                    refresh(&app, &state.inner().clone());
+                    refresh(&app, &state.inner().clone(), MenuUpdate::Rebuild);
                 }
             });
         }))
@@ -152,7 +149,7 @@ fn main() {
             let loop_handle = app.handle().clone();
             let loop_state = for_setup.clone();
             std::thread::spawn(move || loop {
-                refresh(&loop_handle, &loop_state);
+                refresh(&loop_handle, &loop_state, MenuUpdate::Rebuild);
                 std::thread::sleep(REFRESH_INTERVAL);
             });
 
@@ -213,7 +210,7 @@ fn build_menu(app: &AppHandle, model: &MenuModel) -> tauri::Result<Menu<tauri::W
         .text("rotate", "Rotate")
         .text("best", "Best Quota")
         .separator()
-        .text("refresh", &model.refresh_label)
+        .text("refresh", "Refresh now")
         .text("dashboard", "Open Dashboard")
         .item(&autostart)
         .separator()
@@ -222,15 +219,59 @@ fn build_menu(app: &AppHandle, model: &MenuModel) -> tauri::Result<Menu<tauri::W
 }
 
 /// Push the current state into the tray icon: menu plus tooltip.
-fn render(app: &AppHandle, state: &Shared) {
-    let model = state.lock().unwrap().view();
+/// Whether a refresh may rebuild the menu when it finishes.
+///
+/// Rebuilding replaces the menu, and replacing it destroys the `HMENU` that
+/// `TrackPopupMenu` holds while a popup is on screen. A refresh started by a
+/// tray click is therefore forbidden from touching it: that popup is open
+/// right now, by definition. A refresh from the five-minute timer is allowed,
+/// because the odds of a tick landing inside the moment a menu happens to be
+/// open are small — and that is a pre-existing risk, not one the click path
+/// gets to add on every single open.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuUpdate {
+    Rebuild,
+    Skip,
+}
+
+/// Rebuild the tray menu from the current state.
+///
+/// Only ever called from the tray's click handler, on the main thread, before
+/// `tray-icon` opens the popup on the matching button-up. That timing is the
+/// whole point.
+///
+/// `set_menu` drops the menu it replaces, and dropping a `muda::Menu` calls
+/// `DestroyMenu` on its `HMENU`. If a popup is on screen, that is the very
+/// handle `TrackPopupMenu` is holding — so replacing the menu then tears the
+/// popup down under the user's cursor, drops the click already in flight
+/// (the old menu's `WM_COMMAND` subclass has been detached), and leaves
+/// `user32` operating on a destroyed menu.
+///
+/// `TrackPopupMenu` blocks the main thread in a modal loop that still pumps
+/// posted messages, which is exactly how `run_on_main_thread` delivers work.
+/// So a background thread cannot safely rebuild the menu either, however it
+/// gets to the main thread. Background refreshes call [`render_tooltip`]
+/// instead, and the menu is rebuilt the next time it is opened.
+fn apply_menu(app: &AppHandle, model: &MenuModel) {
+    if let Some(tray) = app.tray_by_id("main") {
+        if let Ok(menu) = build_menu(app, model) {
+            let _ = tray.set_menu(Some(menu));
+        }
+        let _ = tray.set_tooltip(Some(&model.tooltip));
+    }
+}
+
+/// Update the tooltip, leaving the menu alone.
+///
+/// Safe from any thread at any time: the tooltip is a string on the icon, not
+/// a menu Windows might be displaying. See [`apply_menu`] for why the menu
+/// cannot be touched here.
+fn render_tooltip(app: &AppHandle, state: &Shared) {
+    let tooltip = state.lock().unwrap().view().tooltip;
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
         if let Some(tray) = app.tray_by_id("main") {
-            if let Ok(menu) = build_menu(&app, &model) {
-                let _ = tray.set_menu(Some(menu));
-            }
-            let _ = tray.set_tooltip(Some(&model.tooltip));
+            let _ = tray.set_tooltip(Some(&tooltip));
         }
     });
 }
@@ -239,7 +280,7 @@ fn render(app: &AppHandle, state: &Shared) {
 ///
 /// If a fetch is already running, this records that another one is wanted and
 /// returns; the running fetch picks the request up rather than dropping it.
-fn refresh(app: &AppHandle, state: &Shared) {
+fn refresh(app: &AppHandle, state: &Shared, menu: MenuUpdate) {
     {
         let mut guard = state.lock().unwrap();
         if guard.busy {
@@ -283,7 +324,6 @@ fn refresh(app: &AppHandle, state: &Shared) {
             match outcome {
                 Ok(list) => {
                     guard.snapshot = Some(list);
-                    guard.fetched_at = Some(Instant::now());
                     guard.error = None;
                     guard.cswap_missing = false;
                     guard.notice = None;
@@ -298,7 +338,16 @@ fn refresh(app: &AppHandle, state: &Shared) {
             }
         }
 
-        render(app, state);
+        match menu {
+            MenuUpdate::Rebuild => {
+                let model = state.lock().unwrap().view();
+                let app_for_menu = app.clone();
+                let _ = app.clone().run_on_main_thread(move || {
+                    apply_menu(&app_for_menu, &model);
+                });
+            }
+            MenuUpdate::Skip => render_tooltip(app, state),
+        }
 
         // Read `pending` AFTER rendering, and clear `busy` in the same lock
         // acquisition that decides to stop. Reading it earlier would lose a
@@ -340,16 +389,21 @@ fn on_tray_event(app: &AppHandle, event: TrayIconEvent) {
     let Some(state) = app.try_state::<Shared>().map(|s| s.inner().clone()) else {
         return;
     };
+    // Fetch, but do NOT touch the menu on this path.
+    //
+    // There is no safe moment to rebuild it from here. Tauri does not call
+    // this handler from the window procedure; it posts the event to the event
+    // loop (`tauri::app` hands `TrayIconEvent` to `proxy.send_event`). So by
+    // the time we run, `WM_LBUTTONUP` has already opened the popup, and
+    // `TrackPopupMenu` is sitting in a modal loop that pumps exactly the
+    // messages `run_on_main_thread` uses. Replacing the menu here — directly
+    // or via the main thread — destroys the `HMENU` Windows is displaying.
+    //
+    // So the click only refreshes data and the tooltip. The menu the user is
+    // reading was built by the last timer tick, and the next tick picks up
+    // what this fetch found.
     let app = app.clone();
-    std::thread::spawn(move || {
-        // Repaint from what we already hold before fetching. The menu Windows
-        // is about to draw is built from the current state, and the fetch below
-        // takes on the order of a second — without this the freshness label
-        // would still read as of the last refresh, which is the bug that made
-        // `Refresh now   · 방금 갱신` permanent.
-        render(&app, &state);
-        refresh(&app, &state);
-    });
+    std::thread::spawn(move || refresh(&app, &state, MenuUpdate::Skip));
 }
 
 fn on_menu_event(app: &AppHandle, id: String) {
@@ -364,7 +418,7 @@ fn on_menu_event(app: &AppHandle, id: String) {
         // never emits an event. Present so the id is accounted for.
         "notice" => {}
         "refresh" => {
-            std::thread::spawn(move || refresh(&app, &state));
+            std::thread::spawn(move || refresh(&app, &state, MenuUpdate::Rebuild));
         }
         "rotate" => spawn_switch(app, state, Switch::Rotate),
         "best" => spawn_switch(app, state, Switch::Best),
@@ -380,13 +434,13 @@ fn on_menu_event(app: &AppHandle, id: String) {
             if let Err(err) = result {
                 state.lock().unwrap().notice =
                     Some(format!("대시보드 실행 실패: {}", err.summary()));
-                render(&app, &state);
+                render_tooltip(&app, &state);
             }
         }
         "install" => {
             if let Err(err) = cswap::open_url(cswap::INSTALL_GUIDE_URL) {
                 state.lock().unwrap().notice = Some(format!("설치 안내 열기 실패: {err}"));
-                render(&app, &state);
+                render_tooltip(&app, &state);
             }
         }
         "autostart" => {
@@ -395,7 +449,7 @@ fn on_menu_event(app: &AppHandle, id: String) {
                 state.lock().unwrap().notice =
                     Some(format!("시작프로그램 설정 실패: {err}"));
             }
-            render(&app, &state);
+            render_tooltip(&app, &state);
         }
         other => {
             if let Some(num) = other.strip_prefix("acct:").and_then(|n| n.parse().ok()) {
@@ -414,9 +468,9 @@ fn spawn_switch(app: AppHandle, state: Shared, target: Switch) {
         };
         if let Err(err) = result {
             state.lock().unwrap().notice = Some(format!("전환 실패: {}", err.summary()));
-            render(&app, &state);
+            render_tooltip(&app, &state);
             return;
         }
-        refresh(&app, &state);
+        refresh(&app, &state, MenuUpdate::Rebuild);
     });
 }
