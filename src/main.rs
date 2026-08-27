@@ -307,7 +307,12 @@ fn on_menu_event(app: &AppHandle, id: String) {
             // Filled in by Task 7.
         }
         "autostart" => {
-            // Filled in by Task 6.
+            let want = !claude_swap_bar::autostart::is_enabled();
+            if let Err(err) = claude_swap_bar::autostart::set(want) {
+                state.lock().unwrap().notice =
+                    Some(format!("시작프로그램 설정 실패: {err}"));
+            }
+            render(&app, &state);
         }
         other => {
             if let Some(num) = other.strip_prefix("acct:").and_then(|n| n.parse().ok()) {
