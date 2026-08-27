@@ -64,12 +64,33 @@ fn a_hung_child_times_out_and_does_not_block_forever() {
 }
 
 #[test]
-fn switch_passes_the_expected_arguments() {
+fn run_passes_argv_through_to_the_child() {
     let args = with_mode("echo-args", || {
         cswap::run(&fake(), &["switch", "2", "--json"])
     })
     .expect("run should succeed");
     assert_eq!(args, "switch 2 --json");
+}
+
+#[test]
+fn switch_sends_its_variant_args_to_the_child() {
+    // Covers the composition of Switch::args with the spawn, which neither
+    // `run_passes_argv_through_to_the_child` nor the pure args test reaches.
+    let args = with_mode("echo-args", || {
+        cswap::run(
+            &fake(),
+            &Switch::Best
+                .args()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )
+    })
+    .expect("run should succeed");
+    assert_eq!(args, "switch --strategy best --json");
+
+    with_mode("ok", || cswap::switch(&fake(), Switch::Account(2)))
+        .expect("switch should succeed on a zero exit");
 }
 
 #[test]
@@ -86,4 +107,65 @@ fn switch_variants_map_to_cswap_arguments() {
 fn a_missing_executable_is_not_found() {
     let err = cswap::list(&PathBuf::from("definitely-not-a-real-binary-xyz")).unwrap_err();
     assert!(matches!(err, CswapError::NotFound), "got {err:?}");
+}
+
+#[test]
+fn error_summaries_are_the_lines_the_menu_shows() {
+    // These strings are the whole failure UI in v1 — the tray has no other
+    // way to say something went wrong — so they are worth pinning.
+    assert_eq!(CswapError::NotFound.summary(), "cswap을 찾을 수 없음");
+    assert_eq!(
+        CswapError::Timeout.summary(),
+        "갱신 실패: 응답 없음 (10초 초과)"
+    );
+    assert_eq!(
+        CswapError::Failed {
+            code: Some(3),
+            stderr: "cswap: no accounts configured".to_string(),
+        }
+        .summary(),
+        "갱신 실패: cswap: no accounts configured"
+    );
+    assert_eq!(
+        CswapError::Failed {
+            code: Some(3),
+            stderr: String::new(),
+        }
+        .summary(),
+        "갱신 실패: 종료 코드 3",
+        "an empty stderr must not render the Rust debug form of the code"
+    );
+    assert_eq!(
+        CswapError::Failed {
+            code: None,
+            stderr: String::new(),
+        }
+        .summary(),
+        "갱신 실패: 비정상 종료"
+    );
+    assert_eq!(
+        CswapError::BadJson("expected value".to_string()).summary(),
+        "갱신 실패: 응답을 해석할 수 없음"
+    );
+}
+
+#[test]
+fn undecodable_child_output_survives_as_replacement_characters() {
+    // `cswap` is a Python program, so on a Korean Windows install it writes
+    // cp949 to a redirected pipe. `read_to_string` would leave the buffer
+    // empty on those bytes and erase the diagnostic entirely.
+    let err = with_mode("cp949-stderr", || cswap::list(&fake())).unwrap_err();
+    match err {
+        CswapError::Failed { stderr, .. } => {
+            assert!(
+                !stderr.is_empty(),
+                "non-UTF-8 stderr must not vanish; got an empty string"
+            );
+            assert!(
+                stderr.contains('\u{FFFD}'),
+                "expected replacement characters, got {stderr:?}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
 }

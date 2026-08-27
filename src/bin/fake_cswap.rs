@@ -17,6 +17,14 @@ fn main() {
             writeln!(err, "second line of noise").unwrap();
             std::process::exit(3);
         }
+        "cp949-stderr" => {
+            // "계정 없음" encoded as cp949 — what a Python child actually
+            // writes to a redirected pipe on a Korean Windows install. These
+            // bytes are not valid UTF-8.
+            let bytes: &[u8] = &[0xB0, 0xE8, 0xC1, 0xA4, 0x20, 0xBE, 0xF8, 0xC0, 0xBD, 0x0A];
+            std::io::stderr().write_all(bytes).unwrap();
+            std::process::exit(4);
+        }
         "hang" => {
             std::thread::sleep(std::time::Duration::from_secs(60));
         }

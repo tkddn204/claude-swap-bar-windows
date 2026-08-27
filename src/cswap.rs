@@ -34,8 +34,13 @@ impl CswapError {
             CswapError::Failed { stderr, .. } if !stderr.is_empty() => {
                 format!("갱신 실패: {stderr}")
             }
-            CswapError::Failed { code, .. } => {
-                format!("갱신 실패: 종료 코드 {code:?}")
+            // Not `{code:?}`: that renders as "종료 코드 Some(3)", leaking Rust
+            // syntax into a line the user reads in the tray menu.
+            CswapError::Failed { code: Some(code), .. } => {
+                format!("갱신 실패: 종료 코드 {code}")
+            }
+            CswapError::Failed { code: None, .. } => {
+                "갱신 실패: 비정상 종료".to_string()
             }
             CswapError::BadJson(_) => "갱신 실패: 응답을 해석할 수 없음".to_string(),
         }
@@ -120,17 +125,24 @@ fn run_owned(exe: &Path, args: &[String]) -> Result<String, CswapError> {
 
     // Drain both pipes on their own threads. A child that fills a pipe buffer
     // while we wait on the other one would otherwise deadlock.
+    //
+    // Decode lossily rather than with `read_to_string`. `cswap` is a Python
+    // program, and Python writes to a redirected pipe using the locale
+    // encoding — cp949 on a Korean Windows install. `read_to_string` leaves
+    // the buffer EMPTY on invalid UTF-8, which would turn a real error
+    // message into "the child printed nothing" and erase the diagnostic the
+    // menu is supposed to show. Replacement characters beat silence.
     let (out_tx, out_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = stdout.read_to_string(&mut buf);
-        let _ = out_tx.send(buf);
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = out_tx.send(String::from_utf8_lossy(&buf).into_owned());
     });
     let (err_tx, err_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = stderr.read_to_string(&mut buf);
-        let _ = err_tx.send(buf);
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        let _ = err_tx.send(String::from_utf8_lossy(&buf).into_owned());
     });
 
     // Poll rather than waiting on a thread: a thread parked in `Child::wait`
@@ -152,8 +164,13 @@ fn run_owned(exe: &Path, args: &[String]) -> Result<String, CswapError> {
         }
     };
 
-    let out = out_rx.recv().unwrap_or_default();
-    let err = err_rx.recv().unwrap_or_default();
+    // Bounded, not `recv()`. A pipe reaches EOF only once every holder of its
+    // write end closes, which includes any grandchild that outlived the child
+    // we just reaped — so an unbounded wait here could hang forever after the
+    // timeout logic had already done its job.
+    let drain = Duration::from_secs(1);
+    let out = out_rx.recv_timeout(drain).unwrap_or_default();
+    let err = err_rx.recv_timeout(drain).unwrap_or_default();
 
     if code == Some(0) {
         Ok(out)
