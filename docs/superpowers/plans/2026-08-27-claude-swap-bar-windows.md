@@ -617,6 +617,14 @@ fn main() {
             writeln!(err, "second line of noise").unwrap();
             std::process::exit(3);
         }
+        "cp949-stderr" => {
+            // "계정 없음" encoded as cp949 — what a Python child actually
+            // writes to a redirected pipe on a Korean Windows install. These
+            // bytes are not valid UTF-8.
+            let bytes: &[u8] = &[0xB0, 0xE8, 0xC1, 0xA4, 0x20, 0xBE, 0xF8, 0xC0, 0xBD, 0x0A];
+            std::io::stderr().write_all(bytes).unwrap();
+            std::process::exit(4);
+        }
         "hang" => {
             std::thread::sleep(std::time::Duration::from_secs(60));
         }
@@ -706,12 +714,33 @@ fn a_hung_child_times_out_and_does_not_block_forever() {
 }
 
 #[test]
-fn switch_passes_the_expected_arguments() {
+fn run_passes_argv_through_to_the_child() {
     let args = with_mode("echo-args", || {
         cswap::run(&fake(), &["switch", "2", "--json"])
     })
     .expect("run should succeed");
     assert_eq!(args, "switch 2 --json");
+}
+
+#[test]
+fn switch_sends_its_variant_args_to_the_child() {
+    // Covers the composition of Switch::args with the spawn, which neither
+    // `run_passes_argv_through_to_the_child` nor the pure args test reaches.
+    let args = with_mode("echo-args", || {
+        cswap::run(
+            &fake(),
+            &Switch::Best
+                .args()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )
+    })
+    .expect("run should succeed");
+    assert_eq!(args, "switch --strategy best --json");
+
+    with_mode("ok", || cswap::switch(&fake(), Switch::Account(2)))
+        .expect("switch should succeed on a zero exit");
 }
 
 #[test]
@@ -728,6 +757,67 @@ fn switch_variants_map_to_cswap_arguments() {
 fn a_missing_executable_is_not_found() {
     let err = cswap::list(&PathBuf::from("definitely-not-a-real-binary-xyz")).unwrap_err();
     assert!(matches!(err, CswapError::NotFound), "got {err:?}");
+}
+
+#[test]
+fn error_summaries_are_the_lines_the_menu_shows() {
+    // These strings are the whole failure UI in v1 — the tray has no other
+    // way to say something went wrong — so they are worth pinning.
+    assert_eq!(CswapError::NotFound.summary(), "cswap을 찾을 수 없음");
+    assert_eq!(
+        CswapError::Timeout.summary(),
+        "갱신 실패: 응답 없음 (10초 초과)"
+    );
+    assert_eq!(
+        CswapError::Failed {
+            code: Some(3),
+            stderr: "cswap: no accounts configured".to_string(),
+        }
+        .summary(),
+        "갱신 실패: cswap: no accounts configured"
+    );
+    assert_eq!(
+        CswapError::Failed {
+            code: Some(3),
+            stderr: String::new(),
+        }
+        .summary(),
+        "갱신 실패: 종료 코드 3",
+        "an empty stderr must not render the Rust debug form of the code"
+    );
+    assert_eq!(
+        CswapError::Failed {
+            code: None,
+            stderr: String::new(),
+        }
+        .summary(),
+        "갱신 실패: 비정상 종료"
+    );
+    assert_eq!(
+        CswapError::BadJson("expected value".to_string()).summary(),
+        "갱신 실패: 응답을 해석할 수 없음"
+    );
+}
+
+#[test]
+fn undecodable_child_output_survives_as_replacement_characters() {
+    // `cswap` is a Python program, so on a Korean Windows install it writes
+    // cp949 to a redirected pipe. `read_to_string` would leave the buffer
+    // empty on those bytes and erase the diagnostic entirely.
+    let err = with_mode("cp949-stderr", || cswap::list(&fake())).unwrap_err();
+    match err {
+        CswapError::Failed { stderr, .. } => {
+            assert!(
+                !stderr.is_empty(),
+                "non-UTF-8 stderr must not vanish; got an empty string"
+            );
+            assert!(
+                stderr.contains('\u{FFFD}'),
+                "expected replacement characters, got {stderr:?}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
 }
 ```
 
@@ -820,8 +910,13 @@ impl CswapError {
             CswapError::Failed { stderr, .. } if !stderr.is_empty() => {
                 format!("갱신 실패: {stderr}")
             }
-            CswapError::Failed { code, .. } => {
-                format!("갱신 실패: 종료 코드 {code:?}")
+            // Not `{code:?}`: that renders as "종료 코드 Some(3)", leaking Rust
+            // syntax into a line the user reads in the tray menu.
+            CswapError::Failed { code: Some(code), .. } => {
+                format!("갱신 실패: 종료 코드 {code}")
+            }
+            CswapError::Failed { code: None, .. } => {
+                "갱신 실패: 비정상 종료".to_string()
             }
             CswapError::BadJson(_) => "갱신 실패: 응답을 해석할 수 없음".to_string(),
         }
@@ -906,17 +1001,24 @@ fn run_owned(exe: &Path, args: &[String]) -> Result<String, CswapError> {
 
     // Drain both pipes on their own threads. A child that fills a pipe buffer
     // while we wait on the other one would otherwise deadlock.
+    //
+    // Decode lossily rather than with `read_to_string`. `cswap` is a Python
+    // program, and Python writes to a redirected pipe using the locale
+    // encoding — cp949 on a Korean Windows install. `read_to_string` leaves
+    // the buffer EMPTY on invalid UTF-8, which would turn a real error
+    // message into "the child printed nothing" and erase the diagnostic the
+    // menu is supposed to show. Replacement characters beat silence.
     let (out_tx, out_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = stdout.read_to_string(&mut buf);
-        let _ = out_tx.send(buf);
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = out_tx.send(String::from_utf8_lossy(&buf).into_owned());
     });
     let (err_tx, err_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = stderr.read_to_string(&mut buf);
-        let _ = err_tx.send(buf);
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        let _ = err_tx.send(String::from_utf8_lossy(&buf).into_owned());
     });
 
     // Poll rather than waiting on a thread: a thread parked in `Child::wait`
@@ -938,8 +1040,13 @@ fn run_owned(exe: &Path, args: &[String]) -> Result<String, CswapError> {
         }
     };
 
-    let out = out_rx.recv().unwrap_or_default();
-    let err = err_rx.recv().unwrap_or_default();
+    // Bounded, not `recv()`. A pipe reaches EOF only once every holder of its
+    // write end closes, which includes any grandchild that outlived the child
+    // we just reaped — so an unbounded wait here could hang forever after the
+    // timeout logic had already done its job.
+    let drain = Duration::from_secs(1);
+    let out = out_rx.recv_timeout(drain).unwrap_or_default();
+    let err = err_rx.recv_timeout(drain).unwrap_or_default();
 
     if code == Some(0) {
         Ok(out)
@@ -966,7 +1073,7 @@ pub fn switch(exe: &Path, target: Switch) -> Result<(), CswapError> {
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cargo test --test cswap_process`
-Expected: PASS, 7 tests. The `a_hung_child_times_out_and_does_not_block_forever` test takes about ten seconds.
+Expected: PASS, 10 tests. The `a_hung_child_times_out_and_does_not_block_forever` test takes about ten seconds.
 
 `Switch::args()` returns `Vec<String>` while the assertions compare against
 `vec!["switch", "7", "--json"]`. That compiles: `Vec<A>` implements
@@ -2058,7 +2165,7 @@ pub fn open_dashboard(exe: &Path) -> Result<(), CswapError> {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `cargo test --test cswap_process`
-Expected: PASS, 8 tests.
+Expected: PASS, 11 tests.
 
 - [ ] **Step 5: Wire the menu item**
 
@@ -2172,7 +2279,7 @@ Checked against `docs/superpowers/specs/2026-08-27-claude-swap-bar-windows-desig
 | 3 CLI wrapper architecture | Task 3 |
 | 3.1 cswap commands used | Task 3 (`list`, `switch`, `switch --strategy best`), Task 7 (`tui`) |
 | 4 Module structure | Task 1 (`main`), 2 (`model`), 3 (`cswap`), 4 (`menu`), 6 (`autostart`) |
-| 10 Test count expectations | Task 2: 9, Task 3: 7 (8 after Task 7), Task 4: 15, Task 6: 3 |
+| 10 Test count expectations | Task 2: 9, Task 3: 10 (11 after Task 7), Task 4: 15, Task 6: 3 |
 | 4.1 Module contracts | Task 3 (exe lookup, `CREATE_NO_WINDOW`, 10s timeout), Task 2 (optional fields), Task 4 (pure conversion), Task 6 (registry) |
 | 5 Data flow, refresh coalescing | Task 5 (`busy` flag, `run_on_main_thread`) |
 | 6 Static icon | Task 1 (`include_image!`, never `set_icon`) |
