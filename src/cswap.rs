@@ -36,12 +36,12 @@ impl CswapError {
             }
             // Not `{code:?}`: that renders as "종료 코드 Some(3)", leaking Rust
             // syntax into a line the user reads in the tray menu.
-            CswapError::Failed { code: Some(code), .. } => {
+            CswapError::Failed {
+                code: Some(code), ..
+            } => {
                 format!("갱신 실패: 종료 코드 {code}")
             }
-            CswapError::Failed { code: None, .. } => {
-                "갱신 실패: 비정상 종료".to_string()
-            }
+            CswapError::Failed { code: None, .. } => "갱신 실패: 비정상 종료".to_string(),
             CswapError::BadJson(_) => "갱신 실패: 응답을 해석할 수 없음".to_string(),
         }
     }
