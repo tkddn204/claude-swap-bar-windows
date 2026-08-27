@@ -9,6 +9,12 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListResponse {
+    /// Defaulted, not required. Nothing reads this — it is kept because it
+    /// documents the wire format we were written against — and a required
+    /// field nothing reads is a liability: a `cswap` that renamed or dropped
+    /// `schemaVersion` would turn every refresh into `BadJson`, which is the
+    /// opposite of the forward compatibility this doc comment claims.
+    #[serde(default)]
     pub schema_version: u32,
     #[serde(default)]
     pub active_account_number: Option<u32>,
@@ -81,12 +87,6 @@ impl Account {
     /// The alias if one is set, otherwise the email address.
     pub fn display_name(&self) -> &str {
         self.alias.as_deref().unwrap_or(&self.email)
-    }
-
-    /// `cswap` reports `"ok"` for a usable account. Any other value, including
-    /// a missing one, means we should not claim the account is fine.
-    pub fn is_healthy(&self) -> bool {
-        self.usage_status.as_deref() == Some("ok")
     }
 
     /// The raw status string when it is not `"ok"`, for display verbatim.
@@ -171,23 +171,32 @@ mod tests {
     }
 
     #[test]
-    fn health_follows_usage_status_verbatim() {
+    fn a_status_note_repeats_usage_status_verbatim_unless_it_is_ok() {
         let ok = ListResponse::parse(TWO).unwrap();
-        assert!(ok.accounts[0].is_healthy());
         assert_eq!(ok.accounts[0].status_note(), None);
 
         let limited = ListResponse::parse(MINIMAL).unwrap();
-        assert!(!limited.accounts[0].is_healthy());
         assert_eq!(limited.accounts[0].status_note(), Some("rate_limited"));
     }
 
     #[test]
-    fn missing_usage_status_counts_as_unhealthy_without_a_note() {
+    fn a_missing_usage_status_produces_no_note() {
         let json = r#"{"schemaVersion":1,"activeAccountNumber":1,
             "accounts":[{"number":1,"email":"a@example.com","active":true}]}"#;
         let list = ListResponse::parse(json).unwrap();
-        assert!(!list.accounts[0].is_healthy());
         assert_eq!(list.accounts[0].status_note(), None);
+    }
+
+    #[test]
+    fn a_response_without_a_schema_version_still_parses() {
+        // Forward compatibility cuts both ways: a key can appear, and a key we
+        // never read can go away. Neither may break a refresh.
+        let json = r#"{"activeAccountNumber":1,
+            "accounts":[{"number":1,"email":"a@example.com","active":true,
+            "usageStatus":"ok"}]}"#;
+        let list = ListResponse::parse(json).expect("schemaVersion is not required");
+        assert_eq!(list.schema_version, 0);
+        assert_eq!(list.accounts.len(), 1);
     }
 
     #[test]
