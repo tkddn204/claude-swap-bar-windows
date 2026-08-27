@@ -184,7 +184,7 @@ Windows 트레이 툴팁은 최대 127자다. 초과하면 뒤쪽 줄부터 잘�
   Rotate
   Best Quota
   ───────────────────────────────────────────
-  Refresh now               · 2분 전 갱신
+  Refresh now
   Open Dashboard
   Start with Windows    [✓]
   ───────────────────────────────────────────
