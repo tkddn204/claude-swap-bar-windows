@@ -25,6 +25,32 @@ struct State {
     /// True while a `cswap list` call is in flight, so requests coalesce.
     /// Only ever touched while the mutex is held.
     busy: bool,
+    /// Set when a request arrives while one is already in flight. The running
+    /// refresh fetches once more before finishing, so the late caller's result
+    /// still reaches the UI. Dropping the request instead would strand a
+    /// just-completed account switch: the check mark would not move until the
+    /// next five-minute tick.
+    pending: bool,
+}
+
+/// Clears the in-flight flag on every exit path, including a panic.
+///
+/// Without this, a panic inside the fetch would leave `busy` stuck true and
+/// silently freeze every future refresh — the tooltip would stop changing and
+/// `Refresh now` would do nothing, with no symptom visible from the tray.
+struct BusyGuard(Shared);
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        let mut guard = match self.0.lock() {
+            Ok(guard) => guard,
+            // The payload is plain data, so a poisoned lock is still usable
+            // and clearing the flag matters more than propagating the panic.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.busy = false;
+        guard.pending = false;
+    }
 }
 
 impl State {
@@ -48,10 +74,17 @@ fn main() {
         error: None,
         notice: None,
         busy: false,
+        pending: false,
     }));
 
-    if state.lock().unwrap().exe.is_none() {
-        state.lock().unwrap().error = Some(CswapError::NotFound.summary());
+    {
+        // One acquisition, not two: `std::sync::Mutex` is not reentrant, so
+        // locking in the condition and again in the body is a self-deadlock
+        // waiting for someone to rewrite it as `if let`.
+        let mut guard = state.lock().unwrap();
+        if guard.exe.is_none() {
+            guard.error = Some(CswapError::NotFound.summary());
+        }
     }
 
     let for_setup = state.clone();
@@ -77,13 +110,12 @@ fn main() {
                 .show_menu_on_left_click(true)
                 .build(app)?;
 
-            let handle = app.handle().clone();
             tray.on_menu_event(move |app, event| {
                 on_menu_event(app, event.id().as_ref().to_string());
             });
 
             // First refresh immediately, then every REFRESH_INTERVAL.
-            let loop_handle = handle.clone();
+            let loop_handle = app.handle().clone();
             let loop_state = for_setup.clone();
             std::thread::spawn(move || loop {
                 refresh(&loop_handle, &loop_state);
@@ -159,39 +191,61 @@ fn render(app: &AppHandle, state: &Shared) {
     });
 }
 
-/// Fetch a fresh snapshot. Returns immediately if one is already in flight.
+/// Fetch a fresh snapshot.
+///
+/// If a fetch is already running, this records that another one is wanted and
+/// returns; the running fetch picks the request up rather than dropping it.
 fn refresh(app: &AppHandle, state: &Shared) {
-    let exe = {
+    {
         let mut guard = state.lock().unwrap();
         if guard.busy {
+            guard.pending = true;
             return;
         }
         guard.busy = true;
-        guard.exe.clone()
-    };
-
-    let outcome = match exe {
-        Some(exe) => cswap::list(&exe),
-        None => Err(CswapError::NotFound),
-    };
-
-    {
-        let mut guard = state.lock().unwrap();
-        match outcome {
-            Ok(list) => {
-                guard.snapshot = Some(list);
-                guard.fetched_at = Some(Instant::now());
-                guard.error = None;
-                guard.notice = None;
-            }
-            Err(err) => {
-                guard.error = Some(err.summary());
-            }
-        }
-        guard.busy = false;
     }
+    // Cleared on every exit path below, panics included.
+    let _busy = BusyGuard(state.clone());
 
-    render(app, state);
+    loop {
+        // Re-resolve the executable while we have none: `cswap` may have been
+        // installed since startup, and the alternative is showing "not found"
+        // until the app is restarted.
+        let exe = {
+            let mut guard = state.lock().unwrap();
+            if guard.exe.is_none() {
+                guard.exe = cswap::find_exe();
+            }
+            guard.exe.clone()
+        };
+
+        let outcome = match exe {
+            Some(exe) => cswap::list(&exe),
+            None => Err(CswapError::NotFound),
+        };
+
+        let again = {
+            let mut guard = state.lock().unwrap();
+            match outcome {
+                Ok(list) => {
+                    guard.snapshot = Some(list);
+                    guard.fetched_at = Some(Instant::now());
+                    guard.error = None;
+                    guard.notice = None;
+                }
+                Err(err) => {
+                    guard.error = Some(err.summary());
+                }
+            }
+            std::mem::take(&mut guard.pending)
+        };
+
+        render(app, state);
+
+        if !again {
+            break;
+        }
+    }
 }
 
 fn on_menu_event(app: &AppHandle, id: String) {
@@ -202,6 +256,8 @@ fn on_menu_event(app: &AppHandle, id: String) {
 
     match id.as_str() {
         "quit" => app.exit(0),
+        // Unreachable in practice: the notice row is built disabled, so it
+        // never emits an event. Present so the id is accounted for.
         "notice" => {}
         "refresh" => {
             std::thread::spawn(move || refresh(&app, &state));
