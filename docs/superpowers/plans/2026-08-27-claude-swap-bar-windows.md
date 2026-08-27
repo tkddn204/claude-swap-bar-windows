@@ -2061,40 +2061,111 @@ Append to `src/autostart.rs`:
 mod tests {
     use super::*;
 
-    /// The registry is global to the user, so this test restores whatever it
-    /// found. Running it does not permanently change the user's autostart.
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// These tests read and write the real `Run` key of the real user running
+    /// them. There is no sandbox, so two properties have to hold or a test run
+    /// can silently change what launches at the user's next login.
+    ///
+    /// First, only one test may touch the value at a time. Relying on
+    /// `--test-threads=1` would leave that to whoever types the command: with
+    /// threads, one test can capture its "original" while another has a
+    /// mutation in flight, and then restore that wrong value over the user's
+    /// real setting. That corrupts rather than merely fails.
+    ///
+    /// Second, the value must be put back even when an assertion fails partway
+    /// through, which is exactly when a straight-line restore call is skipped.
+    fn registry_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Holds the lock for the test's whole body and restores the value on drop,
+    /// panics included. The lock is released only after the restore, so the
+    /// next test always observes the original value.
+    struct Restore {
+        was_enabled: bool,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = set(self.was_enabled);
+        }
+    }
+
+    fn guard_registry() -> Restore {
+        // A test that panics poisons the lock; the payload is `()`, so
+        // recovering keeps one failure from cascading into the rest.
+        let lock = registry_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Restore {
+            was_enabled: is_enabled(),
+            _lock: lock,
+        }
+    }
+
     #[test]
     fn toggling_round_trips_through_the_registry() {
-        let original = is_enabled();
+        let _restore = guard_registry();
 
         set(true).expect("enabling should succeed");
         assert!(is_enabled(), "should read back as enabled");
 
         set(false).expect("disabling should succeed");
         assert!(!is_enabled(), "should read back as disabled");
-
-        set(original).expect("restoring should succeed");
-        assert_eq!(is_enabled(), original);
     }
 
     #[test]
     fn disabling_an_absent_value_is_not_an_error() {
-        let original = is_enabled();
+        let _restore = guard_registry();
+
         set(false).expect("first disable");
         set(false).expect("disabling twice must be idempotent");
-        set(original).expect("restore");
     }
 
     #[test]
     fn the_stored_command_is_the_current_executable_in_quotes() {
-        let original = is_enabled();
+        let _restore = guard_registry();
+
         set(true).unwrap();
 
         let stored = stored_command().expect("value should exist");
         let exe = std::env::current_exe().unwrap();
         assert_eq!(stored, format!("\"{}\"", exe.display()));
+    }
 
-        set(original).unwrap();
+    #[test]
+    fn the_guard_restores_the_value_after_a_panic() {
+        // The guard is what stands between a failing test and the user's real
+        // autostart setting, so prove it rather than assuming it. This test
+        // does not take a guard of its own: the mutex is not reentrant, and the
+        // guard under test acquires it inside the closure.
+        let original = {
+            let _probe = guard_registry();
+            is_enabled()
+        };
+
+        // A deliberate panic would otherwise print a backtrace and dirty the
+        // test output, which is supposed to stay pristine.
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panicked = std::panic::catch_unwind(|| {
+            let _guard = guard_registry();
+            set(!is_enabled()).expect("flip the value");
+            panic!("simulated assertion failure");
+        });
+        std::panic::set_hook(previous_hook);
+
+        assert!(panicked.is_err(), "the closure was supposed to panic");
+
+        let _restore = guard_registry();
+        assert_eq!(
+            is_enabled(),
+            original,
+            "the guard must put back what it found even when the test panics"
+        );
     }
 }
 ```
@@ -2158,8 +2229,21 @@ pub fn set(enabled: bool) -> io::Result<()> {
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test autostart -- --test-threads=1`
-Expected: PASS, 3 tests. Single-threaded because all three tests mutate the same registry value.
+Run: `cargo test autostart`
+Expected: PASS, 4 tests.
+
+No `--test-threads=1` is needed: the tests serialize on their own mutex, so
+correctness does not depend on how someone happens to invoke cargo. Run it the
+default, parallel way precisely to prove that.
+
+Then confirm the user's real setting is untouched:
+
+```bash
+powershell -NoProfile -Command "Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name ClaudeSwapBar -ErrorAction SilentlyContinue"
+```
+
+Expected: the same result as before you started — the value present with the
+same data, or absent. Report both readings.
 
 - [ ] **Step 5: Wire the menu item**
 
@@ -2410,7 +2494,7 @@ Checked against `docs/superpowers/specs/2026-08-27-claude-swap-bar-windows-desig
 | 3 CLI wrapper architecture | Task 3 |
 | 3.1 cswap commands used | Task 3 (`list`, `switch`, `switch --strategy best`), Task 7 (`tui`) |
 | 4 Module structure | Task 1 (`main`), 2 (`model`), 3 (`cswap`), 4 (`menu`), 6 (`autostart`) |
-| 10 Test count expectations | Task 2: 9, Task 3: 10 (11 after Task 7), Task 4: 15, Task 6: 3 |
+| 10 Test count expectations | Task 2: 9, Task 3: 10 (11 after Task 7), Task 4: 15, Task 6: 4 |
 | 4.1 Module contracts | Task 3 (exe lookup, `CREATE_NO_WINDOW`, 10s timeout), Task 2 (optional fields), Task 4 (pure conversion), Task 6 (registry) |
 | 5 Data flow, refresh coalescing | Task 5 (`busy` flag, `run_on_main_thread`) |
 | 6 Static icon | Task 1 (`include_image!`, never `set_icon`) |
