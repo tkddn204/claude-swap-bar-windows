@@ -2483,6 +2483,199 @@ git commit -m "feat: open the cswap dashboard and document the release build"
 
 ---
 
+### Task 8: Keep the test double out of the installer, and stop conflating "runnable" with "exits zero"
+
+**Files:**
+- Move: `src/bin/fake_cswap.rs` to `examples/fake_cswap.rs`
+- Modify: `src/cswap.rs` (`probe`)
+- Modify: `tests/cswap_process.rs` (the `fake()` helper and two tests)
+- Modify: `Cargo.toml` if an explicit `[[bin]]` entry for the double exists
+
+**Interfaces:**
+- Consumes: `cswap::{find_exe, TIMEOUT}` and `CswapError` from Task 3
+- Produces: no API change. `probe`'s contract is restored to "can this be executed", and the test double stops being a shipped binary.
+
+Three defects surfaced by the Task 7 review, all created by the plan rather than by an implementer.
+
+- [ ] **Step 1: Move the test double out of `src/bin/`**
+
+Cargo compiles every `src/bin/*.rs` into a binary of this package, and the Tauri bundler packages every binary the package declares. The generated installer script proves it: `target/release/nsis/x64/installer.nsi` carries a `File /a "/oname=fake_cswap.exe"` directive, so the test double, embedded test fixture and all, is installed next to the app.
+
+An example target is built by `cargo test` but is not a package binary, so the bundler ignores it.
+
+```bash
+git mv src/bin/fake_cswap.rs examples/fake_cswap.rs
+```
+
+If `Cargo.toml` declares a `[[bin]]` section for `fake_cswap`, delete it. Leave the `[[bin]]` for `claude-swap-bar` alone.
+
+- [ ] **Step 2: Give the double a short-lived mode**
+
+`open_dashboard_spawns_without_waiting_for_the_child` deliberately never waits on or kills its child, which is the contract under test. With the 60-second `hang` mode that leaves a process holding a lock on the executable for a full minute, and a `cargo build` that follows can fail with "Access is denied".
+
+The timeout test needs a child that outlives the 10-second deadline; the dashboard test only needs one that has not exited by the time the assertion runs. Split them. In `examples/fake_cswap.rs`, replace the `"hang"` arm with these two:
+
+```rust
+        "hang" => {
+            // Must outlive run_owned's 10s deadline, with margin, so the
+            // timeout test observes a kill rather than a natural exit.
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+        "linger" => {
+            // Long enough that a fire-and-forget spawn is still running when
+            // the assertion checks, short enough not to hold a lock on this
+            // executable into the next build.
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+```
+
+- [ ] **Step 3: Point the tests at the example**
+
+`CARGO_BIN_EXE_*` only exists for binaries. Derive the path from the test binary's own location instead. In `tests/cswap_process.rs`, replace `fake()`:
+
+```rust
+/// The test double.
+///
+/// It lives in `examples/` rather than `src/bin/` so the Tauri bundler does
+/// not ship it inside the installer. `cargo test` still builds it, and it
+/// lands beside the test binary's own directory, so derive the path from
+/// `current_exe` rather than `CARGO_BIN_EXE_*`, which exists only for
+/// package binaries.
+fn fake() -> PathBuf {
+    let mut dir = std::env::current_exe().expect("test binary has a path");
+    dir.pop(); // deps/
+    dir.pop(); // debug/ or release/
+    dir.join("examples").join("fake_cswap.exe")
+}
+```
+
+Then switch the dashboard test to the new mode:
+
+```rust
+#[test]
+fn open_dashboard_spawns_without_waiting_for_the_child() {
+    // "linger" stays alive past the assertion. If open_dashboard waited on
+    // the child this call would block; it must return immediately.
+    let started = Instant::now();
+    with_mode("linger", || cswap::open_dashboard(&fake()))
+        .expect("spawning should succeed");
+    assert!(
+        started.elapsed().as_secs() < 5,
+        "open_dashboard blocked for {:?}",
+        started.elapsed()
+    );
+}
+```
+
+- [ ] **Step 4: Restore `probe`'s meaning**
+
+Task 7 routed `probe` through `run_owned` to give it a deadline, but `run_owned` returns `Err` on any non-zero exit. That changed what `find_exe` answers: a `cswap` that exists and spawns but exits non-zero on `--version` is now reported as absent, and the app shows `cswap을 찾을 수 없음` while a usable `cswap` sits on `PATH`.
+
+The deadline was the point; the exit code was not. Keep the first, drop the second. Replace `probe` in `src/cswap.rs`:
+
+```rust
+/// Whether `name` can be executed at all.
+///
+/// Deliberately does NOT require a zero exit. `find_exe` asks whether the
+/// executable is there, and a `cswap` that spawns but exits non-zero on
+/// `--version` is still the one we want; routing this through `run_owned`
+/// would conflate the two and report a usable `cswap` as missing.
+///
+/// The wait is bounded all the same. `find_exe` is called from the refresh
+/// loop whenever no executable is known, and an unbounded wait there parks
+/// the refresh thread with the in-flight flag set, freezing the tray.
+fn probe(name: &str) -> bool {
+    let mut cmd = Command::new(name);
+    cmd.arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    no_window(&mut cmd);
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // It spawned, so it exists; it just did not answer in
+                    // time. Reporting it missing would be the wrong answer.
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
+    }
+}
+```
+
+Both pipes are `Stdio::null`, so nothing can fill a buffer and there is no drain to bound.
+
+- [ ] **Step 5: Cover the regression**
+
+Add to `tests/cswap_process.rs`:
+
+```rust
+#[test]
+fn a_nonzero_exit_is_a_failure_not_a_missing_executable() {
+    // `find_exe` answers whether the executable is there, not whether it
+    // succeeded. Routing probe through run_owned once made a spawnable cswap
+    // that exits non-zero look missing, and the app then reported
+    // "cswap을 찾을 수 없음" with a usable cswap on PATH.
+    let err = with_mode("fail", || cswap::list(&fake())).unwrap_err();
+    assert!(
+        matches!(err, CswapError::Failed { .. }),
+        "a non-zero exit must surface as Failed, not NotFound; got {err:?}"
+    );
+}
+```
+
+This pins the distinction at the layer that has a test seam: a non-zero exit must produce `Failed`, never `NotFound`. `probe` itself takes a bare name and searches `PATH`, so it has no seam a test can drive without installing a fixture onto the machine. Say so in your report rather than inventing coverage for it.
+
+- [ ] **Step 6: Verify the suite and the debug build**
+
+Run: `cargo test`
+Expected: PASS, 40 tests (28 lib, 12 integration), zero warnings.
+
+- [ ] **Step 7: Confirm the double is no longer a package binary**
+
+```bash
+rm -f target/release/fake_cswap.exe
+cargo build --release 2>&1 | tail -3
+ls target/release/fake_cswap.exe
+```
+
+Expected: the build succeeds and the `ls` fails with "No such file or directory". Deleting first matters: a stale copy from an earlier build would otherwise make this check pass for the wrong reason.
+
+- [ ] **Step 8: Confirm it left the installer**
+
+Run: `cargo tauri build`
+
+Then:
+
+```bash
+grep -c "fake_cswap" target/release/nsis/x64/installer.nsi
+```
+
+Expected: `0`. The generated script is the authority here — it lists exactly what the installer writes, so it settles the question without extracting or installing anything.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add Cargo.toml src/cswap.rs tests/cswap_process.rs examples/fake_cswap.rs
+git commit -m "fix: keep the test double out of the installer and restore probe's contract"
+```
+
+---
+
 ## Plan Self-Review
 
 Checked against `docs/superpowers/specs/2026-08-27-claude-swap-bar-windows-design.md`:
@@ -2494,7 +2687,7 @@ Checked against `docs/superpowers/specs/2026-08-27-claude-swap-bar-windows-desig
 | 3 CLI wrapper architecture | Task 3 |
 | 3.1 cswap commands used | Task 3 (`list`, `switch`, `switch --strategy best`), Task 7 (`tui`) |
 | 4 Module structure | Task 1 (`main`), 2 (`model`), 3 (`cswap`), 4 (`menu`), 6 (`autostart`) |
-| 10 Test count expectations | Task 2: 9, Task 3: 10 (11 after Task 7), Task 4: 15, Task 6: 4 |
+| 10 Test count expectations | Task 2: 9, Task 3: 10 (12 after Tasks 7 and 8), Task 4: 15, Task 6: 4 |
 | 4.1 Module contracts | Task 3 (exe lookup, `CREATE_NO_WINDOW`, 10s timeout), Task 2 (optional fields), Task 4 (pure conversion), Task 6 (registry) |
 | 5 Data flow, refresh coalescing | Task 5 (`busy` flag, `run_on_main_thread`) |
 | 6 Static icon | Task 1 (`include_image!`, never `set_icon`) |
