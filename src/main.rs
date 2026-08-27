@@ -9,7 +9,7 @@ use claude_swap_bar::menu::{self, MenuModel, View};
 use claude_swap_bar::model::ListResponse;
 
 use tauri::menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
@@ -134,6 +134,10 @@ fn main() {
 
             tray.on_menu_event(move |app, event| {
                 on_menu_event(app, event.id().as_ref().to_string());
+            });
+
+            tray.on_tray_icon_event(|tray, event| {
+                on_tray_event(tray.app_handle(), event);
             });
 
             // First refresh immediately, then every REFRESH_INTERVAL.
@@ -285,6 +289,44 @@ fn refresh(app: &AppHandle, state: &Shared) {
             break;
         }
     }
+}
+
+/// Opening the tray menu refreshes, which spec section 5 lists as one of the
+/// three refresh triggers alongside the timer and `Refresh now`.
+///
+/// The filter is the whole of this function. `Move`, `Enter` and `Leave` fire
+/// as the pointer travels across the icon — acting on those would spawn a
+/// `cswap list` storm. `Click` itself arrives twice per click, once for the
+/// press and once for the release, so it needs the button state too.
+///
+/// `MouseButtonState::Down` is the press. Tauri's doc comments on that enum
+/// have the two meanings swapped, so read the mapping rather than the prose:
+/// `tray-icon`'s Windows handler builds `Down` from `WM_*BUTTONDOWN` and `Up`
+/// from `WM_*BUTTONUP`, and Tauri converts one to one. Reacting to the press
+/// also gets the work started before `WM_LBUTTONUP` pops the menu open.
+fn on_tray_event(app: &AppHandle, event: TrayIconEvent) {
+    if !matches!(
+        event,
+        TrayIconEvent::Click {
+            button_state: MouseButtonState::Down,
+            ..
+        }
+    ) {
+        return;
+    }
+    let Some(state) = app.try_state::<Shared>().map(|s| s.inner().clone()) else {
+        return;
+    };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        // Repaint from what we already hold before fetching. The menu Windows
+        // is about to draw is built from the current state, and the fetch below
+        // takes on the order of a second — without this the freshness label
+        // would still read as of the last refresh, which is the bug that made
+        // `Refresh now   · 방금 갱신` permanent.
+        render(&app, &state);
+        refresh(&app, &state);
+    });
 }
 
 fn on_menu_event(app: &AppHandle, id: String) {
