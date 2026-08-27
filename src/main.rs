@@ -290,10 +290,17 @@ fn render_tooltip(app: &AppHandle, state: &Shared) {
 
 /// Rebuild the menu and tooltip from a background thread.
 ///
-/// Every caller must know the popup is dismissed. The failure notices use this
-/// because a notice reaches the user *only* through the menu — `menu::tooltip`
-/// never reads `notice` — and they all run after a menu item was clicked,
-/// which closes the popup before the event is delivered.
+/// Callers must have good reason to believe no popup is on screen. The failure
+/// notices use this because a notice reaches the user *only* through the menu —
+/// `menu::tooltip` never reads `notice` — and they run after a menu item was
+/// clicked, which dismisses the popup before the event is delivered.
+///
+/// "Good reason" is not a guarantee, and pretending otherwise is how this area
+/// went wrong before. `spawn_switch` is the honest example: `cswap switch` takes
+/// seconds, and nothing stops the user reopening the tray menu while it runs, so
+/// its notice and its follow-up refresh can still land on a live popup. Windows
+/// emits no event when a menu is dismissed, so there is no seam to close that
+/// with. It is a known residual, recorded in spec section 5.
 fn render_menu(app: &AppHandle, state: &Shared) {
     let model = state.lock().unwrap().view();
     let handle = app.clone();
@@ -424,10 +431,11 @@ fn on_tray_event(app: &AppHandle, event: TrayIconEvent) {
     //
     // Rebuilding synchronously here would usually land before the popup —
     // Tauri posts tray events (`tauri::app` hands `TrayIconEvent` to
-    // `proxy.send_event`), and posted messages are FIFO, so this normally runs
-    // during the button-down dispatch. But "usually" is not a guarantee worth
-    // building on when losing the race destroys a live menu, and it would only
-    // buy a fresher first paint.
+    // `proxy.send_event`), and Win32 hands posted messages to the loop ahead of
+    // pending mouse input, so this normally runs before the button-up that
+    // opens the menu. But "usually" is not a guarantee worth building on when
+    // losing the race destroys a live menu, and it would only buy a fresher
+    // first paint.
     //
     // So the click refreshes data and the tooltip. The menu the user is
     // reading was built by the last rebuild, and the next one picks up what

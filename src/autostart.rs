@@ -62,6 +62,15 @@ mod tests {
     ///
     /// Second, the value must be put back even when an assertion fails partway
     /// through, which is exactly when a straight-line restore call is skipped.
+    /// Write the value verbatim, bypassing `set`'s `current_exe()` lookup.
+    ///
+    /// Only the restore path needs this: it has to put back the exact string
+    /// it found, which for a real installation is the app's path and never
+    /// this test binary's.
+    fn set_command(command: &str) -> io::Result<()> {
+        open(KEY_READ | KEY_WRITE)?.set_value(VALUE_NAME, &command.to_string())
+    }
+
     fn registry_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -70,14 +79,33 @@ mod tests {
     /// Holds the lock for the test's whole body and restores the value on drop,
     /// panics included. The lock is released only after the restore, so the
     /// next test always observes the original value.
+    ///
+    /// It keeps the stored command, not merely whether one existed. `set(true)`
+    /// writes `current_exe()`, which inside a test binary is the harness, not
+    /// whatever the user had. A guard that remembered only a bool would
+    /// "restore" an enabled autostart by pointing it at a test executable in
+    /// `target/debug/deps` — destroying the real setting rather than putting
+    /// it back.
     struct Restore {
-        was_enabled: bool,
+        original: Option<String>,
         _lock: MutexGuard<'static, ()>,
     }
 
     impl Drop for Restore {
         fn drop(&mut self) {
-            let _ = set(self.was_enabled);
+            let _ = restore_to(self.original.as_deref());
+        }
+    }
+
+    /// The guard's restore, factored out so a test can drive it.
+    ///
+    /// The registry mutex is not reentrant, so a test cannot nest a guard to
+    /// observe one restoring. Calling this directly exercises the same code
+    /// `Drop` runs.
+    fn restore_to(original: Option<&str>) -> io::Result<()> {
+        match original {
+            Some(command) => set_command(command),
+            None => set(false),
         }
     }
 
@@ -88,7 +116,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         Restore {
-            was_enabled: is_enabled(),
+            original: stored_command(),
             _lock: lock,
         }
     }
@@ -121,6 +149,38 @@ mod tests {
         let stored = stored_command().expect("value should exist");
         let exe = std::env::current_exe().unwrap();
         assert_eq!(stored, format!("\"{}\"", exe.display()));
+    }
+
+    #[test]
+    fn the_guard_puts_back_the_exact_command_it_found() {
+        // The failure this pins is not "the value came back" but "the value
+        // came back unchanged". A guard that remembered only whether autostart
+        // was on would restore it by calling `set(true)`, which writes this
+        // test binary's own path — silently repointing a real user's autostart
+        // at something in target/debug/deps.
+        let _restore = guard_registry();
+
+        let planted = r#""C:\Program Files\Somebody Elsepp.exe" --flag"#;
+        set_command(planted).expect("plant a pre-existing value");
+
+        {
+            // The mutex is not reentrant, so drive `restore_to` directly —
+            // it is the same code the guard's `Drop` runs.
+            let found = stored_command();
+            set(true).expect("a test mutates it, as every test here does");
+            assert_ne!(
+                stored_command().as_deref(),
+                Some(planted),
+                "set(true) must have overwritten it, or this proves nothing"
+            );
+            restore_to(found.as_deref()).expect("the guard's own restore");
+        }
+
+        assert_eq!(
+            stored_command().as_deref(),
+            Some(planted),
+            "the restore must reproduce the original string, not just enable"
+        );
     }
 
     #[test]
