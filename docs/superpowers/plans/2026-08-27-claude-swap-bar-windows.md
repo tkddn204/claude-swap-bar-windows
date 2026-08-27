@@ -430,10 +430,11 @@ mod tests {
 
 Add `mod model;` to the top of `src/main.rs`, then run:
 
-Run: `cargo test --lib model`
+Run: `cargo test model`
 Expected: FAIL. The compiler reports `cannot find type ListResponse in this scope` and similar, because only the test module exists.
 
-If `cargo test --lib` reports there is no library target, run `cargo test model` instead; the modules live in the binary crate.
+There is no library target yet — the module lives in the binary crate, so
+plain `cargo test model` is the right command here. Task 3 adds the library.
 
 - [ ] **Step 4: Write the implementation**
 
@@ -627,6 +628,7 @@ fn main() {
 
 ```rust
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use claude_swap_bar::cswap::{self, CswapError, Switch};
@@ -635,7 +637,18 @@ fn fake() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake_cswap"))
 }
 
+/// `FAKE_CSWAP_MODE` is process-global, and `cargo test` runs these tests on
+/// several threads of one process. Without this lock two tests would clobber
+/// each other's mode between the `set_var` and the spawn.
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn with_mode<T>(mode: &str, body: impl FnOnce() -> T) -> T {
+    // A panicking test poisons the mutex; the guarded data is `()`, so
+    // recovering is always safe and keeps one failure from cascading.
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("FAKE_CSWAP_MODE", mode);
     let out = body();
     std::env::remove_var("FAKE_CSWAP_MODE");
@@ -742,7 +755,11 @@ name = "claude-swap-bar"
 path = "src/main.rs"
 ```
 
-In `src/main.rs`, replace the `mod model;` line added in Task 2 with `use claude_swap_bar::model;` so the binary consumes the library rather than compiling the modules a second time.
+In `src/main.rs`, delete the `mod model;` line added in Task 2. The binary does
+not use `model` yet — Task 5 adds the `use claude_swap_bar::model;` import when
+it actually needs the type. Leaving the `mod` declaration in place would compile
+the module a second time inside the binary crate; adding an unused `use` now
+would only produce a warning.
 
 - [ ] **Step 5: Write `src/cswap.rs`**
 
@@ -882,27 +899,24 @@ fn run_owned(exe: &Path, args: &[String]) -> Result<String, CswapError> {
         let _ = err_tx.send(buf);
     });
 
-    let (status_tx, status_rx) = mpsc::channel();
-    let mut waiter = child;
-    let handle = std::thread::spawn(move || {
-        let status = waiter.wait();
-        let _ = status_tx.send(status.map(|s| s.code()));
-        waiter
-    });
-
-    let code = match status_rx.recv_timeout(TIMEOUT) {
-        Ok(Ok(code)) => code,
-        Ok(Err(_)) => return Err(CswapError::NotFound),
-        Err(_) => {
-            // Still running. Kill it and let the reader threads unwind.
-            if let Ok(mut child) = handle.join() {
-                let _ = child.kill();
-                let _ = child.wait();
+    // Poll rather than waiting on a thread: a thread parked in `Child::wait`
+    // cannot be joined until the child exits, so a timeout that then joined
+    // that thread would block for exactly as long as it was trying to avoid.
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    let code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code(),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(CswapError::Timeout);
+                }
+                std::thread::sleep(Duration::from_millis(50));
             }
-            return Err(CswapError::Timeout);
+            Err(_) => return Err(CswapError::NotFound),
         }
     };
-    let _ = handle.join();
 
     let out = out_rx.recv().unwrap_or_default();
     let err = err_rx.recv().unwrap_or_default();
@@ -1473,7 +1487,7 @@ fn truncate_lines(text: &str) -> String {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test menu`
-Expected: PASS, 14 tests.
+Expected: PASS, 15 tests.
 
 The exact label strings in the tests were written against this formatting. If a test fails on spacing, fix the implementation to match the test, not the other way around — the tests encode the spec's tooltip layout.
 
@@ -2138,6 +2152,7 @@ Checked against `docs/superpowers/specs/2026-08-27-claude-swap-bar-windows-desig
 | 3 CLI wrapper architecture | Task 3 |
 | 3.1 cswap commands used | Task 3 (`list`, `switch`, `switch --strategy best`), Task 7 (`tui`) |
 | 4 Module structure | Task 1 (`main`), 2 (`model`), 3 (`cswap`), 4 (`menu`), 6 (`autostart`) |
+| 10 Test count expectations | Task 2: 9, Task 3: 7 (8 after Task 7), Task 4: 15, Task 6: 3 |
 | 4.1 Module contracts | Task 3 (exe lookup, `CREATE_NO_WINDOW`, 10s timeout), Task 2 (optional fields), Task 4 (pure conversion), Task 6 (registry) |
 | 5 Data flow, refresh coalescing | Task 5 (`busy` flag, `run_on_main_thread`) |
 | 6 Static icon | Task 1 (`include_image!`, never `set_icon`) |
