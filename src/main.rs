@@ -166,12 +166,18 @@ fn main() {
 fn build_menu(app: &AppHandle, model: &MenuModel) -> tauri::Result<Menu<tauri::Wry>> {
     let mut builder = MenuBuilder::new(app);
 
+    // Built independently rather than nesting the link inside the notice: today
+    // `install_help` only ever comes with a notice, but hiding the link behind
+    // that coincidence means a later change to `notice_line` silently deletes
+    // the only thing a user with no cswap can click.
     if let Some(notice) = model.notice.as_ref() {
         let item = MenuItem::with_id(app, "notice", notice, false, None::<&str>)?;
         builder = builder.item(&item);
-        if model.install_help {
-            builder = builder.text("install", "Install cswap");
-        }
+    }
+    if model.install_help {
+        builder = builder.text("install", "Install cswap");
+    }
+    if model.notice.is_some() || model.install_help {
         builder = builder.separator();
     }
 
