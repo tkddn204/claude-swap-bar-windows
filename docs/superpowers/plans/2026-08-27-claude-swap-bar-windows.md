@@ -2563,13 +2563,22 @@ fn open_dashboard_spawns_without_waiting_for_the_child() {
     // both. The old 5-second threshold was calibrated against a 60-second
     // child and stopped discriminating the moment linger got short — a
     // blocking wait would have finished well inside it and passed.
-    let started = Instant::now();
-    with_mode("linger", || cswap::open_dashboard(&fake()))
-        .expect("spawning should succeed");
-    assert!(
-        started.elapsed().as_millis() < 1_000,
-        "open_dashboard blocked for {:?}; it must not wait on the child",
+    //
+    // The timer starts inside the closure, after `with_mode` has acquired
+    // `env_lock`, not before. `a_hung_child_times_out_and_does_not_block_forever`
+    // holds that lock for its own ~10s timeout; starting the clock outside
+    // the closure would count time spent waiting on that unrelated lock
+    // against this test's budget, failing it under `cargo test`'s default
+    // parallelism whenever the two tests race for the lock.
+    let elapsed = with_mode("linger", || {
+        let started = Instant::now();
+        cswap::open_dashboard(&fake()).expect("spawning should succeed");
         started.elapsed()
+    });
+    assert!(
+        elapsed.as_millis() < 1_000,
+        "open_dashboard blocked for {:?}; it must not wait on the child",
+        elapsed
     );
 }
 ```
