@@ -279,7 +279,10 @@ mod tests {
 
         assert_eq!(model.accounts.len(), 2);
         assert_eq!(model.accounts[0].id, "acct:1");
-        assert_eq!(model.accounts[0].label, "1  work@example.com   5h 0%  7d 12%");
+        assert_eq!(
+            model.accounts[0].label,
+            "1  work@example.com   5h 0%  7d 12%"
+        );
         assert!(!model.accounts[0].checked);
         assert!(model.accounts[0].enabled);
 
@@ -300,7 +303,10 @@ mod tests {
             notice: None,
             cswap_missing: false,
         });
-        assert_eq!(model.accounts[0].label, "3  bot   rate_limited  (자동 제외)");
+        assert_eq!(
+            model.accounts[0].label,
+            "3  bot   rate_limited  (자동 제외)"
+        );
         assert!(model.accounts[0].checked);
     }
 
@@ -407,8 +413,8 @@ mod tests {
     #[test]
     fn usage_cswap_reports_as_current_is_not_called_out() {
         // The active account in TWO has `usageAgeSeconds: 1.6`. Staleness is
-        // cswap's own answer about its cache, so fresh numbers stay unmarked
-        // no matter how long ago this app last managed to fetch them.
+        // cswap's own answer about its cache, so numbers it reports as current
+        // stay unmarked. Covers the below-threshold branch of `stale_usage_age`.
         let list = view_of(TWO);
         let model = build(&View {
             snapshot: Some(&list),
@@ -434,7 +440,6 @@ mod tests {
         });
         assert_eq!(model.notice, None);
     }
-
 
     #[test]
     fn the_tooltip_describes_the_active_account() {
@@ -567,9 +572,9 @@ mod tests {
             model.tooltip.chars().count(),
             model.tooltip
         );
-        assert!(model.tooltip.starts_with(
-            "a-very-long-address-for-testing-truncation@example.com (#1)"
-        ));
+        assert!(model
+            .tooltip
+            .starts_with("a-very-long-address-for-testing-truncation@example.com (#1)"));
         assert!(!model.tooltip.ends_with('\n'));
     }
 
