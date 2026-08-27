@@ -141,7 +141,6 @@ Tauri requires `frontendDist` to resolve to a real directory even when no window
 
 use tauri::menu::MenuBuilder;
 use tauri::tray::TrayIconBuilder;
-use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
@@ -172,7 +171,16 @@ The `windows_subsystem = "windows"` attribute suppresses the console window in r
 - [ ] **Step 6: Build and verify it compiles**
 
 Run: `cargo build`
-Expected: compiles with no errors. The first build downloads and compiles Tauri and takes several minutes.
+Expected: compiles with no errors and no warnings. The first build downloads and compiles Tauri and takes several minutes.
+
+`tauri_build::build()` writes a generated `gen/schemas/` directory beside the
+manifest on every build. It is a build artifact, so add it to `.gitignore`
+alongside `/target/`:
+
+```
+/target/
+/gen/
+```
 
 - [ ] **Step 7: Manual smoke test**
 
@@ -184,7 +192,7 @@ If the icon is hidden behind the notification-area overflow chevron, that is nor
 - [ ] **Step 8: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock build.rs tauri.conf.json dist/index.html src/main.rs
+git add Cargo.toml Cargo.lock build.rs tauri.conf.json dist/index.html src/main.rs .gitignore
 git commit -m "feat: register a static tray icon with a quit menu"
 ```
 
