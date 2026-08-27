@@ -2556,12 +2556,19 @@ Then switch the dashboard test to the new mode:
 fn open_dashboard_spawns_without_waiting_for_the_child() {
     // "linger" stays alive past the assertion. If open_dashboard waited on
     // the child this call would block; it must return immediately.
+    //
+    // The threshold has to sit between "spawned and returned" and "waited for
+    // the child": a spawn costs tens of milliseconds, and a wait would cost
+    // linger's full 2 seconds. One second is an order of magnitude clear of
+    // both. The old 5-second threshold was calibrated against a 60-second
+    // child and stopped discriminating the moment linger got short — a
+    // blocking wait would have finished well inside it and passed.
     let started = Instant::now();
     with_mode("linger", || cswap::open_dashboard(&fake()))
         .expect("spawning should succeed");
     assert!(
-        started.elapsed().as_secs() < 5,
-        "open_dashboard blocked for {:?}",
+        started.elapsed().as_millis() < 1_000,
+        "open_dashboard blocked for {:?}; it must not wait on the child",
         started.elapsed()
     );
 }
