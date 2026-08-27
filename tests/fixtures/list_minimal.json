@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "activeAccountNumber": 3,
+  "accounts": [
+    {
+      "number": 3,
+      "email": "token@example.com",
+      "alias": "bot",
+      "active": true,
+      "disabled": true,
+      "usageStatus": "rate_limited"
+    }
+  ]
+}

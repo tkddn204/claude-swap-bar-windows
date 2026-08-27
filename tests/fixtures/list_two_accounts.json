@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "activeAccountNumber": 2,
+  "accounts": [
+    {
+      "number": 1,
+      "email": "work@example.com",
+      "organizationName": "Example Org",
+      "organizationUuid": "00000000-0000-0000-0000-000000000001",
+      "isOrganization": true,
+      "active": false,
+      "usageStatus": "ok",
+      "usage": {
+        "fiveHour": { "pct": 0.0 },
+        "sevenDay": {
+          "pct": 12.0,
+          "resetsAt": "2026-09-02T06:00:00.361887+00:00",
+          "countdown": "6d 5h",
+          "clock": "Sep 2 15:00"
+        }
+      },
+      "usageFetchedAt": "2026-08-27T00:56:00Z",
+      "usageAgeSeconds": 0.0
+    },
+    {
+      "number": 2,
+      "email": "personal@example.com",
+      "organizationName": "personal@example.com's Organization",
+      "organizationUuid": "00000000-0000-0000-0000-000000000002",
+      "isOrganization": true,
+      "active": true,
+      "usageStatus": "ok",
+      "usage": {
+        "fiveHour": {
+          "pct": 25.0,
+          "resetsAt": "2026-08-27T05:10:00.369589+00:00",
+          "countdown": "4h 14m",
+          "clock": "14:10"
+        },
+        "sevenDay": {
+          "pct": 55.0,
+          "resetsAt": "2026-08-29T05:00:00.369612+00:00",
+          "countdown": "2d 4h",
+          "clock": "Aug 29 14:00",
+          "expectedPct": 69.0,
+          "aheadOfPace": false,
+          "projectedExhaustionAt": "2026-08-30T23:47:13Z",
+          "willLastToReset": true
+        },
+        "spend": {
+          "used": 90.62,
+          "limit": 200.0,
+          "pct": 45.31,
+          "currency": "USD"
+        },
+        "scoped": [
+          { "pct": 0.0, "name": "Fable" }
+        ]
+      },
+      "usageFetchedAt": "2026-08-27T00:55:58Z",
+      "usageAgeSeconds": 1.6
+    }
+  ]
+}

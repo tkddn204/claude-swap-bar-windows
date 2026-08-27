@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod model;
+
 use tauri::menu::MenuBuilder;
 use tauri::tray::TrayIconBuilder;
 
