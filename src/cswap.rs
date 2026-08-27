@@ -226,6 +226,29 @@ pub fn switch(exe: &Path, target: Switch) -> Result<(), CswapError> {
     run_owned(exe, &target.args()).map(|_| ())
 }
 
+/// Where to send a user who has no `cswap` installed.
+pub const INSTALL_GUIDE_URL: &str = "https://github.com/realiti4/claude-swap";
+
+/// Open a URL in whatever the user has set as their default browser.
+///
+/// Routed through `cmd /c start` rather than a URL-opening crate: the process
+/// machinery is already here, and one more dependency to run one more shell
+/// command is not a trade worth making. The empty `""` is not decoration —
+/// `start` reads a first quoted argument as the console window title, so
+/// omitting it would make `start` treat the URL as a title and open nothing.
+///
+/// `CREATE_NO_WINDOW` applies: the console `cmd` would otherwise flash is
+/// ours, not the dashboard's, and there is nothing in it to see.
+pub fn open_url(url: &str) -> Result<(), std::io::Error> {
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/c", "start", "", url])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    no_window(&mut cmd);
+    cmd.spawn().map(|_| ())
+}
+
 /// Launch `cswap tui` in a console window of its own.
 ///
 /// This is the one spawn that must NOT set `CREATE_NO_WINDOW`: the dashboard

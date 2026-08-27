@@ -20,6 +20,11 @@ struct State {
     snapshot: Option<ListResponse>,
     fetched_at: Option<Instant>,
     error: Option<String>,
+    /// True while the last attempt could not find `cswap.exe` at all. Kept
+    /// apart from `exe`, which can still hold a path to an executable that has
+    /// since been deleted, and apart from `error`, which flattens every failure
+    /// to one string. Only this state offers the install guide.
+    cswap_missing: bool,
     /// One-shot message, cleared by the next successful refresh.
     notice: Option<String>,
     /// True while a `cswap list` call is in flight, so requests coalesce.
@@ -82,6 +87,7 @@ impl State {
             age_secs: self.fetched_at.map(|t| t.elapsed().as_secs()),
             error: self.error.as_deref(),
             notice: self.notice.as_deref(),
+            cswap_missing: self.cswap_missing,
         })
     }
 }
@@ -94,6 +100,7 @@ fn main() {
         snapshot: None,
         fetched_at: None,
         error: None,
+        cswap_missing: false,
         notice: None,
         busy: false,
         pending: false,
@@ -106,6 +113,7 @@ fn main() {
         let mut guard = state.lock().unwrap();
         if guard.exe.is_none() {
             guard.error = Some(CswapError::NotFound.summary());
+            guard.cswap_missing = true;
         }
     }
 
@@ -160,7 +168,11 @@ fn build_menu(app: &AppHandle, model: &MenuModel) -> tauri::Result<Menu<tauri::W
 
     if let Some(notice) = model.notice.as_ref() {
         let item = MenuItem::with_id(app, "notice", notice, false, None::<&str>)?;
-        builder = builder.item(&item).separator();
+        builder = builder.item(&item);
+        if model.install_help {
+            builder = builder.text("install", "Install cswap");
+        }
+        builder = builder.separator();
     }
 
     let mut rows = Vec::new();
@@ -267,9 +279,14 @@ fn refresh(app: &AppHandle, state: &Shared) {
                     guard.snapshot = Some(list);
                     guard.fetched_at = Some(Instant::now());
                     guard.error = None;
+                    guard.cswap_missing = false;
                     guard.notice = None;
                 }
                 Err(err) => {
+                    // A `cswap` deleted after we found it fails here as
+                    // `NotFound` too, which is the honest answer: the install
+                    // guide is exactly what that user needs.
+                    guard.cswap_missing = matches!(err, CswapError::NotFound);
                     guard.error = Some(err.summary());
                 }
             }
@@ -347,12 +364,23 @@ fn on_menu_event(app: &AppHandle, id: String) {
         "best" => spawn_switch(app, state, Switch::Best),
         "dashboard" => {
             let exe = state.lock().unwrap().exe.clone();
-            if let Some(exe) = exe {
-                if let Err(err) = cswap::open_dashboard(&exe) {
-                    state.lock().unwrap().notice =
-                        Some(format!("대시보드 실행 실패: {}", err.summary()));
-                    render(&app, &state);
-                }
+            // No `if let` without an else: a click that produces neither a
+            // window nor a message is the silent failure spec section 8 rules
+            // out. `spawn_switch` handles the same case the same way.
+            let result = match exe {
+                Some(exe) => cswap::open_dashboard(&exe),
+                None => Err(CswapError::NotFound),
+            };
+            if let Err(err) = result {
+                state.lock().unwrap().notice =
+                    Some(format!("대시보드 실행 실패: {}", err.summary()));
+                render(&app, &state);
+            }
+        }
+        "install" => {
+            if let Err(err) = cswap::open_url(cswap::INSTALL_GUIDE_URL) {
+                state.lock().unwrap().notice = Some(format!("설치 안내 열기 실패: {err}"));
+                render(&app, &state);
             }
         }
         "autostart" => {

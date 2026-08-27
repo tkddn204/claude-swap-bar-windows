@@ -29,6 +29,9 @@ pub struct View<'a> {
     pub error: Option<&'a str>,
     /// A one-shot message such as a failed switch. Outranks `error`.
     pub notice: Option<&'a str>,
+    /// True when the last attempt could not find `cswap.exe` at all, as
+    /// opposed to running it and getting an error back.
+    pub cswap_missing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +47,11 @@ pub struct AccountRow {
 pub struct MenuModel {
     /// Disabled line shown above the account rows, when there is something to say.
     pub notice: Option<String>,
+    /// Whether to offer the install guide. Spec section 8 pairs the
+    /// `cswap을 찾을 수 없음` line with something to click, and this state is
+    /// the only one where a menu full of account actions has nothing to act
+    /// on — so the item exists here and nowhere else.
+    pub install_help: bool,
     pub accounts: Vec<AccountRow>,
     pub refresh_label: String,
     pub tooltip: String,
@@ -57,6 +65,7 @@ pub fn build(view: &View) -> MenuModel {
 
     MenuModel {
         notice: notice_line(view),
+        install_help: view.cswap_missing,
         accounts,
         refresh_label: refresh_label(view.age_secs),
         tooltip: tooltip(view),
@@ -279,6 +288,7 @@ mod tests {
             age_secs: Some(0),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
 
         assert_eq!(model.accounts.len(), 2);
@@ -303,6 +313,7 @@ mod tests {
             age_secs: Some(0),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert_eq!(model.accounts[0].label, "3  bot   rate_limited  (자동 제외)");
         assert!(model.accounts[0].checked);
@@ -317,6 +328,7 @@ mod tests {
             age_secs: Some(0),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert!(
             model.accounts[0].label.ends_with("(자동 제외)"),
@@ -335,6 +347,7 @@ mod tests {
             age_secs: Some(0),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert!(!model.accounts[0].label.contains("자동 제외"));
         assert!(!model.accounts[1].label.contains("자동 제외"));
@@ -351,6 +364,7 @@ mod tests {
             age_secs: Some(0),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert_eq!(model.accounts[0].label, "1  a@example.com   사용량 없음");
     }
@@ -363,6 +377,7 @@ mod tests {
             age_secs: Some(0),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert!(model.accounts.is_empty());
         assert_eq!(model.notice.as_deref(), Some("등록된 계정 없음"));
@@ -376,6 +391,7 @@ mod tests {
             age_secs: Some(0),
             error: Some("갱신 실패: boom"),
             notice: None,
+            cswap_missing: false,
         });
         assert_eq!(model.notice.as_deref(), Some("갱신 실패: boom"));
         assert_eq!(model.accounts.len(), 2, "rows survive a failed refresh");
@@ -389,6 +405,7 @@ mod tests {
             age_secs: Some(0),
             error: Some("갱신 실패: boom"),
             notice: Some("전환 실패: 잠김"),
+            cswap_missing: false,
         });
         assert_eq!(model.notice.as_deref(), Some("전환 실패: 잠김"));
     }
@@ -401,6 +418,7 @@ mod tests {
             age_secs: Some(3),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert_eq!(
             model.notice.as_deref(),
@@ -422,6 +440,7 @@ mod tests {
             age_secs: Some(720),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert_eq!(model.notice, None);
         assert_eq!(model.refresh_label, "Refresh now   · 12분 전 갱신");
@@ -439,6 +458,7 @@ mod tests {
             age_secs: Some(999_999),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert_eq!(model.notice, None);
     }
@@ -452,6 +472,7 @@ mod tests {
                 age_secs: Some(secs),
                 error: None,
                 notice: None,
+                cswap_missing: false,
             })
             .refresh_label
         };
@@ -464,6 +485,7 @@ mod tests {
             age_secs: None,
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert_eq!(never.refresh_label, "Refresh now");
     }
@@ -476,6 +498,7 @@ mod tests {
             age_secs: Some(0),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert_eq!(
             model.tooltip,
@@ -498,6 +521,7 @@ mod tests {
             age_secs: Some(0),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert_eq!(
             model.tooltip,
@@ -517,9 +541,43 @@ mod tests {
             age_secs: Some(0),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert!(model.tooltip.contains("Opus  42%"));
         assert!(!model.tooltip.contains("Fable"), "0% entries are dropped");
+    }
+
+    #[test]
+    fn the_install_guide_is_offered_only_when_cswap_is_missing() {
+        let missing = build(&View {
+            snapshot: None,
+            age_secs: None,
+            error: Some("cswap을 찾을 수 없음"),
+            notice: None,
+            cswap_missing: true,
+        });
+        assert!(missing.install_help);
+        assert_eq!(missing.notice.as_deref(), Some("cswap을 찾을 수 없음"));
+
+        // Any other failure leaves cswap installed, so the guide would be noise.
+        let other_failure = build(&View {
+            snapshot: None,
+            age_secs: None,
+            error: Some("갱신 실패: 응답 없음 (10초 초과)"),
+            notice: None,
+            cswap_missing: false,
+        });
+        assert!(!other_failure.install_help);
+
+        let healthy = view_of(TWO);
+        let ok = build(&View {
+            snapshot: Some(&healthy),
+            age_secs: Some(0),
+            error: None,
+            notice: None,
+            cswap_missing: false,
+        });
+        assert!(!ok.install_help);
     }
 
     #[test]
@@ -529,6 +587,7 @@ mod tests {
             age_secs: None,
             error: Some("cswap을 찾을 수 없음"),
             notice: None,
+            cswap_missing: false,
         });
         assert_eq!(model.tooltip, "cswap을 찾을 수 없음");
     }
@@ -541,6 +600,7 @@ mod tests {
             age_secs: Some(3),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert!(model.tooltip.starts_with("personal@example.com (#2)"));
         assert!(model.tooltip.contains("(12분 전)"));
@@ -562,6 +622,7 @@ mod tests {
             age_secs: Some(0),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert!(
             model.tooltip.chars().count() <= TOOLTIP_MAX,
@@ -583,6 +644,7 @@ mod tests {
             age_secs: Some(0),
             error: None,
             notice: None,
+            cswap_missing: false,
         });
         assert_eq!(model.tooltip, "등록된 계정 없음");
     }
