@@ -150,6 +150,30 @@ fn error_summaries_are_the_lines_the_menu_shows() {
 }
 
 #[test]
+fn open_dashboard_spawns_without_waiting_for_the_child() {
+    // "hang" sleeps for a minute. If open_dashboard waited on the child this
+    // call would block; it must return immediately.
+    //
+    // The timer starts inside the closure, after `with_mode` has acquired
+    // `env_lock`, not before. This test shares "hang" mode with
+    // `a_hung_child_times_out_and_does_not_block_forever`, which holds that
+    // lock for its own ~10s timeout; starting the clock outside the closure
+    // would count time spent waiting on that unrelated lock against this
+    // test's 5-second budget, failing it under `cargo test`'s default
+    // parallelism whenever the two tests race for the lock.
+    let elapsed = with_mode("hang", || {
+        let started = Instant::now();
+        cswap::open_dashboard(&fake()).expect("spawning should succeed");
+        started.elapsed()
+    });
+    assert!(
+        elapsed.as_secs() < 5,
+        "open_dashboard blocked for {:?}",
+        elapsed
+    );
+}
+
+#[test]
 fn undecodable_child_output_survives_as_replacement_characters() {
     // `cswap` is a Python program, so on a Korean Windows install it writes
     // cp949 to a redirected pipe. `read_to_string` would leave the buffer

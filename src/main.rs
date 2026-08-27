@@ -304,7 +304,14 @@ fn on_menu_event(app: &AppHandle, id: String) {
         "rotate" => spawn_switch(app, state, Switch::Rotate),
         "best" => spawn_switch(app, state, Switch::Best),
         "dashboard" => {
-            // Filled in by Task 7.
+            let exe = state.lock().unwrap().exe.clone();
+            if let Some(exe) = exe {
+                if let Err(err) = cswap::open_dashboard(&exe) {
+                    state.lock().unwrap().notice =
+                        Some(format!("대시보드 실행 실패: {}", err.summary()));
+                    render(&app, &state);
+                }
+            }
         }
         "autostart" => {
             let want = !claude_swap_bar::autostart::is_enabled();

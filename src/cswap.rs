@@ -86,13 +86,14 @@ pub fn find_exe() -> Option<PathBuf> {
     fallback.is_file().then_some(fallback)
 }
 
+/// Whether `name` can be run.
+///
+/// Routed through `run_owned` rather than calling `Command::status()`, so it
+/// inherits the 10-second deadline. An unbounded wait here would park the
+/// refresh thread forever with the in-flight flag set, freezing the tray
+/// rather than surfacing an error.
 fn probe(name: &str) -> bool {
-    let mut cmd = Command::new(name);
-    cmd.arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    no_window(&mut cmd);
-    cmd.status().is_ok()
+    run_owned(Path::new(name), &["--version".to_string()]).is_ok()
 }
 
 #[cfg(windows)]
@@ -191,4 +192,21 @@ pub fn list(exe: &Path) -> Result<ListResponse, CswapError> {
 /// Switch accounts. The JSON body is ignored; only success matters.
 pub fn switch(exe: &Path, target: Switch) -> Result<(), CswapError> {
     run_owned(exe, &target.args()).map(|_| ())
+}
+
+/// Launch `cswap tui` in a console window of its own.
+///
+/// This is the one spawn that must NOT set `CREATE_NO_WINDOW`: the dashboard
+/// is a terminal UI and needs a console to draw in. We do not wait for it.
+pub fn open_dashboard(exe: &Path) -> Result<(), CswapError> {
+    let mut cmd = Command::new(exe);
+    cmd.arg("tui");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        /// Windows `CREATE_NEW_CONSOLE`.
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        cmd.creation_flags(CREATE_NEW_CONSOLE);
+    }
+    cmd.spawn().map(|_| ()).map_err(|_| CswapError::NotFound)
 }
