@@ -449,6 +449,11 @@ plain `cargo test model` is the right command here. Task 3 adds the library.
 Prepend to `src/model.rs`, above the test module:
 
 ```rust
+// Transitional: until Task 3 adds a library target, this module lives in the
+// binary crate, where nothing calls it yet and every public item trips
+// `dead_code`. Task 3 moves it into the library and deletes this attribute.
+#![allow(dead_code)]
+
 use serde::Deserialize;
 
 /// One `cswap list --json` response.
@@ -763,6 +768,13 @@ name = "claude-swap-bar"
 path = "src/main.rs"
 ```
 
+Delete the transitional `#![allow(dead_code)]` attribute and its comment from
+the top of `src/model.rs`. It existed only because `model` lived in the binary
+crate with no callers; as a module of the library its public items are reachable
+from outside the crate, so `dead_code` no longer fires. If a warning does
+appear after this, that item is genuinely unused — report it rather than
+re-adding the suppression.
+
 In `src/main.rs`, delete the `mod model;` line added in Task 2. The binary does
 not use `model` yet — Task 5 adds the `use claude_swap_bar::model;` import when
 it actually needs the type. Leaving the `mod` declaration in place would compile
@@ -974,7 +986,7 @@ Expected: the fixture-driven tests pass, and the real `cswap list --json` prints
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/lib.rs src/cswap.rs src/bin/fake_cswap.rs src/menu.rs src/autostart.rs tests/cswap_process.rs src/main.rs Cargo.toml
+git add src/lib.rs src/cswap.rs src/bin/fake_cswap.rs src/menu.rs src/autostart.rs src/model.rs tests/cswap_process.rs src/main.rs Cargo.toml
 git commit -m "feat: run the cswap CLI with a timeout and typed errors"
 ```
 
