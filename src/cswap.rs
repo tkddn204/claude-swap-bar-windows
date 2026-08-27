@@ -86,14 +86,46 @@ pub fn find_exe() -> Option<PathBuf> {
     fallback.is_file().then_some(fallback)
 }
 
-/// Whether `name` can be run.
+/// Whether `name` can be executed at all.
 ///
-/// Routed through `run_owned` rather than calling `Command::status()`, so it
-/// inherits the 10-second deadline. An unbounded wait here would park the
-/// refresh thread forever with the in-flight flag set, freezing the tray
-/// rather than surfacing an error.
+/// Deliberately does NOT require a zero exit. `find_exe` asks whether the
+/// executable is there, and a `cswap` that spawns but exits non-zero on
+/// `--version` is still the one we want; routing this through `run_owned`
+/// would conflate the two and report a usable `cswap` as missing.
+///
+/// The wait is bounded all the same. `find_exe` is called from the refresh
+/// loop whenever no executable is known, and an unbounded wait there parks
+/// the refresh thread with the in-flight flag set, freezing the tray.
 fn probe(name: &str) -> bool {
-    run_owned(Path::new(name), &["--version".to_string()]).is_ok()
+    let mut cmd = Command::new(name);
+    cmd.arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    no_window(&mut cmd);
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // It spawned, so it exists; it just did not answer in
+                    // time. Reporting it missing would be the wrong answer.
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 #[cfg(windows)]

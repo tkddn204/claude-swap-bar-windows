@@ -8,7 +8,7 @@ fn main() {
         "ok" => {
             print!(
                 "{}",
-                include_str!("../../tests/fixtures/list_two_accounts.json")
+                include_str!("../tests/fixtures/list_two_accounts.json")
             );
         }
         "fail" => {
@@ -26,7 +26,15 @@ fn main() {
             std::process::exit(4);
         }
         "hang" => {
-            std::thread::sleep(std::time::Duration::from_secs(60));
+            // Must outlive run_owned's 10s deadline, with margin, so the
+            // timeout test observes a kill rather than a natural exit.
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+        "linger" => {
+            // Long enough that a fire-and-forget spawn is still running when
+            // the assertion checks, short enough not to hold a lock on this
+            // executable into the next build.
+            std::thread::sleep(std::time::Duration::from_secs(2));
         }
         "badjson" => {
             print!("{{ not json");

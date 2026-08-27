@@ -4,8 +4,18 @@ use std::time::Instant;
 
 use claude_swap_bar::cswap::{self, CswapError, Switch};
 
+/// The test double.
+///
+/// It lives in `examples/` rather than `src/bin/` so the Tauri bundler does
+/// not ship it inside the installer. `cargo test` still builds it, and it
+/// lands beside the test binary's own directory, so derive the path from
+/// `current_exe` rather than `CARGO_BIN_EXE_*`, which exists only for
+/// package binaries.
 fn fake() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_fake_cswap"))
+    let mut dir = std::env::current_exe().expect("test binary has a path");
+    dir.pop(); // deps/
+    dir.pop(); // debug/ or release/
+    dir.join("examples").join("fake_cswap.exe")
 }
 
 /// `FAKE_CSWAP_MODE` is process-global, and `cargo test` runs these tests on
@@ -151,17 +161,16 @@ fn error_summaries_are_the_lines_the_menu_shows() {
 
 #[test]
 fn open_dashboard_spawns_without_waiting_for_the_child() {
-    // "hang" sleeps for a minute. If open_dashboard waited on the child this
-    // call would block; it must return immediately.
+    // "linger" stays alive past the assertion. If open_dashboard waited on
+    // the child this call would block; it must return immediately.
     //
     // The timer starts inside the closure, after `with_mode` has acquired
-    // `env_lock`, not before. This test shares "hang" mode with
-    // `a_hung_child_times_out_and_does_not_block_forever`, which holds that
-    // lock for its own ~10s timeout; starting the clock outside the closure
-    // would count time spent waiting on that unrelated lock against this
-    // test's 5-second budget, failing it under `cargo test`'s default
-    // parallelism whenever the two tests race for the lock.
-    let elapsed = with_mode("hang", || {
+    // `env_lock`, not before. `a_hung_child_times_out_and_does_not_block_forever`
+    // holds that lock for its own ~10s timeout; starting the clock outside
+    // the closure would count time spent waiting on that unrelated lock
+    // against this test's 5-second budget, failing it under `cargo test`'s
+    // default parallelism whenever the two tests race for the lock.
+    let elapsed = with_mode("linger", || {
         let started = Instant::now();
         cswap::open_dashboard(&fake()).expect("spawning should succeed");
         started.elapsed()
@@ -170,6 +179,19 @@ fn open_dashboard_spawns_without_waiting_for_the_child() {
         elapsed.as_secs() < 5,
         "open_dashboard blocked for {:?}",
         elapsed
+    );
+}
+
+#[test]
+fn a_nonzero_exit_is_a_failure_not_a_missing_executable() {
+    // `find_exe` answers whether the executable is there, not whether it
+    // succeeded. Routing probe through run_owned once made a spawnable cswap
+    // that exits non-zero look missing, and the app then reported
+    // "cswap을 찾을 수 없음" with a usable cswap on PATH.
+    let err = with_mode("fail", || cswap::list(&fake())).unwrap_err();
+    assert!(
+        matches!(err, CswapError::Failed { .. }),
+        "a non-zero exit must surface as Failed, not NotFound; got {err:?}"
     );
 }
 
