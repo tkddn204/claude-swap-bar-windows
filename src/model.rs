@@ -1,8 +1,3 @@
-// Transitional: until Task 3 adds a library target, this module lives in the
-// binary crate, where nothing calls it yet and every public item trips
-// `dead_code`. Task 3 moves it into the library and deletes this attribute.
-#![allow(dead_code)]
-
 use serde::Deserialize;
 
 /// One `cswap list --json` response.

@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2021"
 description = "Windows system tray app for the cswap Claude Code account switcher"
 
+[lib]
+name = "claude_swap_bar"
+path = "src/lib.rs"
+
+[[bin]]
+name = "claude-swap-bar"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
