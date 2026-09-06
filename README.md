@@ -5,6 +5,8 @@ A Windows system tray app for [claude-swap](https://github.com/realiti4/claude-s
 account's rate-limit usage in the tray tooltip and switches accounts from the
 tray menu.
 
+![Claude Swap Bar tray menu with no registered accounts](docs/images/example.png)
+
 Design inspired by the macOS [claude-swap-bar](https://github.com/jx-grxf/claude-swap-bar).
 This app delegates credential handling and usage retrieval to the cswap CLI.
 Compatibility depends on its commands and JSON output; a minimum supported
