@@ -2,6 +2,8 @@
 name = "claude-swap-bar"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+authors = ["tkddn <tkddn204@gmail.com>"]
 description = "Windows system tray app for the cswap Claude Code account switcher"
 
 [lib]

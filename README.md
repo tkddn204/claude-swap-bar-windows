@@ -57,3 +57,10 @@ python tools/make_icon.py icons   # regenerate the icon assets
 
 The tray icon is static. Usage and error state appear only in the tooltip and
 the menu.
+
+## License
+
+Copyright 2026 tkddn <tkddn204@gmail.com>.
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+Third-party dependencies remain under their respective licenses.

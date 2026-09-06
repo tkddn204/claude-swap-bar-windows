@@ -172,7 +172,7 @@ Windows는 메뉴가 닫힐 때 이벤트를 주지 않으므로 코드로 판�
 ### 6.1 툴팁
 
 ```
-tkddn204@gmail.com (#2)
+personal@example.com (#2)
 5h  25%   리셋 4h 14m
 7d  55%   리셋 2d 4h
 $   90.62 / 200  (45%)
@@ -188,8 +188,8 @@ Windows 트레이 툴팁은 최대 127자다. 초과하면 뒤쪽 줄부터 잘�
 좌클릭과 우클릭 모두 같은 메뉴를 연다.
 
 ```
-  ✓ 2  tkddn204@gmail.com   5h 25%  7d 55%
-    1  tkddn204@gmail.com         5h  0%  7d 12%
+  ✓ 2  personal@example.com   5h 25%  7d 55%
+    1  work@example.com         5h  0%  7d 12%
   ───────────────────────────────────────────
   Rotate
   Best Quota
