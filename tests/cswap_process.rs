@@ -30,10 +30,18 @@ fn with_mode<T>(mode: &str, body: impl FnOnce() -> T) -> T {
     // A panicking test poisons the mutex; the guarded data is `()`, so
     // recovering is always safe and keeps one failure from cascading.
     let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    struct RestoreMode(Option<std::ffi::OsString>);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            match self.0.as_ref() {
+                Some(value) => std::env::set_var("FAKE_CSWAP_MODE", value),
+                None => std::env::remove_var("FAKE_CSWAP_MODE"),
+            }
+        }
+    }
+    let _restore = RestoreMode(std::env::var_os("FAKE_CSWAP_MODE"));
     std::env::set_var("FAKE_CSWAP_MODE", mode);
-    let out = body();
-    std::env::remove_var("FAKE_CSWAP_MODE");
-    out
+    body()
 }
 
 #[test]
@@ -63,13 +71,15 @@ fn unparseable_output_is_bad_json_not_a_panic() {
 
 #[test]
 fn a_hung_child_times_out_and_does_not_block_forever() {
-    let started = Instant::now();
-    let err = with_mode("hang", || cswap::list(&fake())).unwrap_err();
+    let (err, elapsed) = with_mode("hang", || {
+        let started = Instant::now();
+        (cswap::list(&fake()).unwrap_err(), started.elapsed())
+    });
     assert!(matches!(err, CswapError::Timeout), "got {err:?}");
     assert!(
-        started.elapsed().as_secs() < 20,
+        elapsed.as_secs() < 20,
         "timeout took {:?}, expected roughly 10s",
-        started.elapsed()
+        elapsed
     );
 }
 
