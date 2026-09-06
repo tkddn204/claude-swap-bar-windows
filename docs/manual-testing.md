@@ -16,6 +16,7 @@ installer filename with the results. Use dedicated accounts for switch tests.
 - Uninstall normally, including while the app is running. Confirm that the
   current user's Run key no longer contains `ClaudeSwapBar`.
 - Verify that the installed directory does not contain `fake_cswap.exe`.
+- Verify that the installed directory includes the Apache-2.0 `LICENSE` file.
 
 ## CLI integration and menu behavior
 

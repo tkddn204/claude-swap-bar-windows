@@ -20,6 +20,19 @@ Rust 1.95.0에서 전체 45개 테스트와 Clippy(`-D warnings`), 포맷 검사
 후속 결과로 갱신되었습니다. 설치본 검증은 `docs/manual-testing.md`에 정리했으며
 아직 실행하지 않았습니다. Windows CI와 릴리스 자동화는 여전히 미구현입니다.
 
+CI·패키징 후속 정리(2026-09-06): `.github/workflows/windows.yml`을 추가하여
+PR, main 푸시, 수동 실행에서 포맷·Clippy·테스트·NSIS 빌드와 설치본/체크섬
+보관을 구성했습니다. Rust 1.95.0과 Tauri CLI 2.11.4를 고정했습니다.
+actionlint 1.7.7 문법 검사가 통과했고 로컬 테스트 45개와 Clippy도 통과했습니다.
+GitHub remote가 없어 서버에서 워크플로를 실행한 결과는 아직 없습니다.
+
+로컬 `cargo tauri build --bundles nsis -- --locked`가 성공하여
+`target/release/bundle/nsis/Claude Swap Bar_0.1.0_x64-setup.exe`를 생성했습니다.
+생성된 NSIS 스크립트에서 LICENSE 리소스와 제거 훅을 확인했고, fake_cswap은
+포함되지 않았습니다. SHA-256 체크섬도 같은 폴더에 생성했습니다. 이는 빌드와
+설치 스크립트 검증이며 실제 설치·업그레이드·제거 검증은 아닙니다.
+릴리스 자동 게시, 코드 서명, GitHub 서버 실행 검증은 여전히 남아 있습니다.
+
 ## 판단과 범위
 
 프로젝트에는 트레이 앱 구현, CLI 경계, JSON 모델, 테스트, 아이콘, NSIS 제거 훅이 갖춰져 있습니다. 그러나 처음 방문한 사용자가 설치하고, 기여자가 빌드를 재현하고, 관리자가 릴리스를 검증하는 절차는 부족합니다. 공개 저장소 업로드 전 개인정보를 정리하고, 첫 설치본 배포 전 재현 가능한 검증을 마련하는 순서가 적절합니다.

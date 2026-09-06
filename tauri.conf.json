@@ -15,6 +15,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "resources": ["LICENSE"],
     "icon": ["icons/tray.ico"],
     "windows": {
       "nsis": {

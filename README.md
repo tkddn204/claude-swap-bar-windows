@@ -61,7 +61,7 @@ information before installation.
 3. Install the Tauri v2 CLI separately:
 
    ```powershell
-   cargo install tauri-cli --version "^2" --locked
+   cargo install tauri-cli --version 2.11.4 --locked
    cargo tauri --version
    ```
 
@@ -145,6 +145,15 @@ python tools/make_icon.py icons
 Automated tests do not verify live tray interactions or installer behavior.
 See the [manual release checks](docs/manual-testing.md) before distribution.
 Cross-platform app builds are not supported.
+
+### Windows CI
+
+[Windows CI](.github/workflows/windows.yml) runs on pull requests, pushes to
+`main`, and manual dispatch. It uses Windows Server 2022 x64, Rust 1.95.0, and
+Tauri CLI 2.11.4 to check formatting, run Clippy and tests, and build an NSIS
+installer. Successful runs retain the installer and `SHA256SUMS.txt` as a
+GitHub Actions artifact for 14 days. This workflow does not publish a release
+or sign the installer. A passing CI run does not replace Windows 11 manual QA.
 
 ## Troubleshooting and limitations
 
