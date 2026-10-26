@@ -2,8 +2,8 @@
 
 A Windows system tray app for [claude-swap](https://github.com/realiti4/claude-swap)
 (`cswap`), the multi-account switcher for Claude Code. It shows the active
-account's rate-limit usage in the tray tooltip and switches accounts from the
-tray menu.
+account's five-hour usage as a percentage on the tray icon, the full rate-limit
+detail in the tooltip, and switches accounts from the tray menu.
 
 ![Claude Swap Bar tray menu with no registered accounts](docs/images/example.png)
 
@@ -159,8 +159,12 @@ or sign the installer. A passing CI run does not replace Windows 11 manual QA.
 
 ## Troubleshooting and limitations
 
-The tray icon is static. Usage and error state appear only in the tooltip and
-the menu.
+The tray icon shows the active account's five-hour usage as a percentage on a
+green, amber (70%+) or red (90%+) badge. Grey means the numbers are stale or
+missing, and `!` means cswap reported a non-`ok` usage status. On an error, or
+when `Show usage on icon` is unchecked, the static icon returns and the reason
+appears in the tooltip and menu. The setting is stored as `ShowUsageIcon` under
+`HKEY_CURRENT_USER\Software\ClaudeSwapBar` and removed on uninstall.
 
 - **No tray icon:** check the taskbar overflow. Initial discovery may take ten
   seconds if `cswap --version` stops responding.

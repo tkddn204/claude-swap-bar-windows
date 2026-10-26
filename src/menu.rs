@@ -1,3 +1,4 @@
+use crate::badge::Badge;
 use crate::model::{Account, ListResponse};
 
 /// Windows caps `NOTIFYICONDATA::szTip` at 128 UTF-16 code units including the
@@ -28,6 +29,8 @@ pub struct View<'a> {
     /// True when the last attempt could not find `cswap.exe` at all, as
     /// opposed to running it and getting an error back.
     pub cswap_missing: bool,
+    /// Whether the user wants usage drawn on the tray icon.
+    pub usage_icon: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +53,10 @@ pub struct MenuModel {
     pub install_help: bool,
     pub accounts: Vec<AccountRow>,
     pub tooltip: String,
+    /// What the tray icon shows.
+    pub badge: Badge,
+    /// Check state of the `Show usage on icon` item.
+    pub usage_icon: bool,
 }
 
 pub fn build(view: &View) -> MenuModel {
@@ -63,6 +70,8 @@ pub fn build(view: &View) -> MenuModel {
         install_help: view.cswap_missing,
         accounts,
         tooltip: tooltip(view),
+        badge: badge(view),
+        usage_icon: view.usage_icon,
     }
 }
 
@@ -208,6 +217,34 @@ fn tooltip(view: &View) -> String {
     truncate_lines(&lines.join("\n"))
 }
 
+/// The active account's five-hour usage, for the tray icon.
+///
+/// Five hours rather than seven days because it is the number that moves over
+/// a working day and the one that decides whether to switch now. Every state
+/// with nothing trustworthy to say — an error, no snapshot yet, no active
+/// account — falls back to the logo, and the tooltip carries the reason.
+fn badge(view: &View) -> Badge {
+    if !view.usage_icon || view.error.is_some() {
+        return Badge::Logo;
+    }
+    let Some(snapshot) = view.snapshot else {
+        return Badge::Logo;
+    };
+    let Some(account) = snapshot.accounts.iter().find(|a| a.active) else {
+        return Badge::Logo;
+    };
+    if account.status_note().is_some() {
+        return Badge::Alert;
+    }
+    match account.usage.as_ref().and_then(|u| u.five_hour.as_ref()) {
+        Some(w) if w.pct.is_finite() => Badge::Percent {
+            pct: round_pct(w.pct).clamp(0, 100) as u32,
+            stale: stale_usage_age(snapshot).is_some(),
+        },
+        _ => Badge::Unknown,
+    }
+}
+
 fn window_line(label: &str, pct: f64, countdown: Option<&str>) -> String {
     let head = format!("{label}  {:>2}%", round_pct(pct));
     match countdown {
@@ -275,6 +312,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
 
         assert_eq!(model.accounts.len(), 2);
@@ -302,6 +340,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert_eq!(
             model.accounts[0].label,
@@ -319,6 +358,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert!(
             model.accounts[0].label.ends_with("(자동 제외)"),
@@ -337,6 +377,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert!(!model.accounts[0].label.contains("자동 제외"));
         assert!(!model.accounts[1].label.contains("자동 제외"));
@@ -353,6 +394,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert_eq!(model.accounts[0].label, "1  a@example.com   사용량 없음");
     }
@@ -365,6 +407,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert!(model.accounts.is_empty());
         assert_eq!(model.notice.as_deref(), Some("등록된 계정 없음"));
@@ -378,6 +421,7 @@ mod tests {
             error: Some("갱신 실패: boom"),
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert_eq!(model.notice.as_deref(), Some("갱신 실패: boom"));
         assert_eq!(model.accounts.len(), 2, "rows survive a failed refresh");
@@ -391,6 +435,7 @@ mod tests {
             error: Some("갱신 실패: boom"),
             notice: Some("전환 실패: 잠김"),
             cswap_missing: false,
+            usage_icon: true,
         });
         assert_eq!(model.notice.as_deref(), Some("전환 실패: 잠김"));
     }
@@ -403,6 +448,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert_eq!(
             model.notice.as_deref(),
@@ -421,6 +467,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert_eq!(model.notice, None);
         assert!(!model.tooltip.contains("전)"));
@@ -437,6 +484,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert_eq!(model.notice, None);
     }
@@ -449,6 +497,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert_eq!(
             model.tooltip,
@@ -471,6 +520,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert_eq!(
             model.tooltip,
@@ -490,6 +540,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert!(model.tooltip.contains("Opus  42%"));
         assert!(!model.tooltip.contains("Fable"), "0% entries are dropped");
@@ -502,6 +553,7 @@ mod tests {
             error: Some("cswap을 찾을 수 없음"),
             notice: None,
             cswap_missing: true,
+            usage_icon: true,
         });
         assert!(missing.install_help);
         assert_eq!(missing.notice.as_deref(), Some("cswap을 찾을 수 없음"));
@@ -512,6 +564,7 @@ mod tests {
             error: Some("갱신 실패: 응답 없음 (10초 초과)"),
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert!(!other_failure.install_help);
 
@@ -521,6 +574,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert!(!ok.install_help);
     }
@@ -532,6 +586,7 @@ mod tests {
             error: Some("cswap을 찾을 수 없음"),
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert_eq!(model.tooltip, "cswap을 찾을 수 없음");
     }
@@ -544,6 +599,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert!(model.tooltip.starts_with("personal@example.com (#2)"));
         assert!(model.tooltip.contains("(12분 전)"));
@@ -565,6 +621,7 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert!(
             model.tooltip.chars().count() <= TOOLTIP_MAX,
@@ -586,7 +643,148 @@ mod tests {
             error: None,
             notice: None,
             cswap_missing: false,
+            usage_icon: true,
         });
         assert_eq!(model.tooltip, "등록된 계정 없음");
+    }
+
+    fn badge_of(view: View) -> Badge {
+        build(&view).badge
+    }
+
+    fn healthy(list: &ListResponse) -> View<'_> {
+        View {
+            snapshot: Some(list),
+            error: None,
+            notice: None,
+            cswap_missing: false,
+            usage_icon: true,
+        }
+    }
+
+    #[test]
+    fn the_badge_shows_the_active_accounts_five_hour_usage() {
+        // The active account in TWO is #2, at 5h 25% and 7d 55%.
+        let list = view_of(TWO);
+        assert_eq!(
+            badge_of(healthy(&list)),
+            Badge::Percent {
+                pct: 25,
+                stale: false
+            }
+        );
+    }
+
+    #[test]
+    fn turning_the_badge_off_restores_the_logo() {
+        let list = view_of(TWO);
+        let view = View {
+            usage_icon: false,
+            ..healthy(&list)
+        };
+        let model = build(&view);
+        assert_eq!(model.badge, Badge::Logo);
+        assert!(!model.usage_icon);
+    }
+
+    #[test]
+    fn errors_and_missing_data_fall_back_to_the_logo() {
+        let list = view_of(TWO);
+        assert_eq!(
+            badge_of(View {
+                error: Some("갱신 실패: boom"),
+                ..healthy(&list)
+            }),
+            Badge::Logo
+        );
+        assert_eq!(
+            badge_of(View {
+                snapshot: None,
+                ..healthy(&list)
+            }),
+            Badge::Logo
+        );
+        let empty = view_of(EMPTY);
+        assert_eq!(badge_of(healthy(&empty)), Badge::Logo);
+    }
+
+    #[test]
+    fn a_one_shot_notice_does_not_hide_the_usage() {
+        let list = view_of(TWO);
+        assert!(matches!(
+            badge_of(View {
+                notice: Some("전환 실패: 잠김"),
+                ..healthy(&list)
+            }),
+            Badge::Percent { pct: 25, .. }
+        ));
+    }
+
+    #[test]
+    fn a_bad_usage_status_shows_an_alert() {
+        // MINIMAL's only account is active and `rate_limited`.
+        let list = view_of(MINIMAL);
+        assert_eq!(badge_of(healthy(&list)), Badge::Alert);
+    }
+
+    #[test]
+    fn an_active_account_without_a_five_hour_window_is_unknown() {
+        let json = r#"{"schemaVersion":1,"activeAccountNumber":1,
+            "accounts":[{"number":1,"email":"a@example.com","active":true,
+            "usageStatus":"ok","usage":{"sevenDay":{"pct":40.0}}}]}"#;
+        let list = view_of(json);
+        assert_eq!(badge_of(healthy(&list)), Badge::Unknown);
+    }
+
+    #[test]
+    fn stale_usage_is_marked_on_the_badge() {
+        let list = view_of(STALE_USAGE);
+        assert_eq!(
+            badge_of(healthy(&list)),
+            Badge::Percent {
+                pct: 25,
+                stale: true
+            }
+        );
+    }
+
+    #[test]
+    fn badge_percentages_are_rounded_and_clamped() {
+        let at = |pct: &str| {
+            let json = format!(
+                r#"{{"schemaVersion":1,"accounts":[{{"number":1,"email":"a@example.com",
+                "active":true,"usageStatus":"ok","usage":{{"fiveHour":{{"pct":{pct}}}}}}}]}}"#
+            );
+            let list = view_of(&json);
+            badge_of(healthy(&list))
+        };
+        assert_eq!(
+            at("49.5"),
+            Badge::Percent {
+                pct: 50,
+                stale: false
+            }
+        );
+        assert_eq!(
+            at("0.4"),
+            Badge::Percent {
+                pct: 0,
+                stale: false
+            }
+        );
+        assert_eq!(
+            at("130.0"),
+            Badge::Percent {
+                pct: 100,
+                stale: false
+            }
+        );
+        assert_eq!(
+            at("-3.0"),
+            Badge::Percent {
+                pct: 0,
+                stale: false
+            }
+        );
     }
 }

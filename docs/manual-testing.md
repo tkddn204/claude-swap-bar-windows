@@ -14,7 +14,8 @@ installer filename with the results. Use dedicated accounts for switch tests.
 - Upgrade with automatic launch enabled. Confirm it remains enabled and the
   Run value points to the installed executable.
 - Uninstall normally, including while the app is running. Confirm that the
-  current user's Run key no longer contains `ClaudeSwapBar`.
+  current user's Run key no longer contains `ClaudeSwapBar`, and that
+  `HKCU\Software\ClaudeSwapBar` is gone.
 - Verify that the installed directory does not contain `fake_cswap.exe`.
 - Verify that the installed directory includes the Apache-2.0 `LICENSE` file.
 
@@ -32,6 +33,18 @@ installer filename with the results. Use dedicated accounts for switch tests.
   Opening alone refreshes the tooltip; account rows update on a rebuild.
 - Hold the menu open across a five-minute refresh, and reopen it while an
   account switch runs. Record popup closure or lost clicks as known risks.
+
+## Tray icon badge
+
+- At 100%, 150% and 200% display scaling, confirm the percentage is sharp
+  (not blurred) and readable on both light and dark taskbars.
+- Confirm the badge matches the tooltip's `5h` value after a refresh and after
+  a switch, and that colours change at 70% and 90%.
+- Confirm an error (for example, cswap removed) restores the static icon.
+- Uncheck `Show usage on icon`, confirm the static icon returns, restart the
+  app and confirm the setting persisted. Check it again and confirm the badge
+  returns without waiting for the next refresh.
+- Upgrade with the badge turned off and confirm it stays off.
 
 ## Release evidence
 

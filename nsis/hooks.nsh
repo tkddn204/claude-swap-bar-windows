@@ -9,9 +9,11 @@
 ;
 ; Guarded on $UpdateMode for the same reason Tauri guards its own: an update
 ; runs the uninstaller first, and wiping the value there would silently turn
-; off a "Start with Windows" the user had chosen.
+; off a "Start with Windows" the user had chosen. The settings key
+; (src/settings.rs) is kept across updates for the same reason.
 !macro NSIS_HOOK_POSTUNINSTALL
   ${If} $UpdateMode <> 1
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "ClaudeSwapBar"
+    DeleteRegKey HKCU "Software\ClaudeSwapBar"
   ${EndIf}
 !macroend

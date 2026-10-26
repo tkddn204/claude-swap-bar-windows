@@ -4,10 +4,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use claude_swap_bar::badge::{self, Badge};
 use claude_swap_bar::cswap::{self, CswapError, Switch};
 use claude_swap_bar::menu::{self, MenuModel, View};
 use claude_swap_bar::model::ListResponse;
 
+use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem};
 use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
@@ -40,6 +42,8 @@ struct State {
     /// is in flight still needs the menu rebuilt, and folding it into a `Skip`
     /// would strand the check mark exactly as dropping the request would.
     pending: Option<MenuUpdate>,
+    /// Mirror of the registry setting, so building a view never reads it.
+    usage_icon: bool,
 }
 
 /// Clears the in-flight flag if a refresh unwinds.
@@ -91,6 +95,7 @@ impl State {
             error: self.error.as_deref(),
             notice: self.notice.as_deref(),
             cswap_missing: self.cswap_missing,
+            usage_icon: self.usage_icon,
         })
     }
 }
@@ -106,6 +111,7 @@ fn main() {
         notice: None,
         busy: false,
         pending: None,
+        usage_icon: claude_swap_bar::settings::usage_icon(),
     }));
 
     {
@@ -210,6 +216,14 @@ fn build_menu(app: &AppHandle, model: &MenuModel) -> tauri::Result<Menu<tauri::W
         autostart_on,
         None::<&str>,
     )?;
+    let usage_icon = CheckMenuItem::with_id(
+        app,
+        "usage_icon",
+        "Show usage on icon",
+        true,
+        model.usage_icon,
+        None::<&str>,
+    )?;
 
     builder
         .text("rotate", "Rotate")
@@ -217,6 +231,7 @@ fn build_menu(app: &AppHandle, model: &MenuModel) -> tauri::Result<Menu<tauri::W
         .separator()
         .text("refresh", "Refresh now")
         .text("dashboard", "Open Dashboard")
+        .item(&usage_icon)
         .item(&autostart)
         .separator()
         .text("quit", "Quit")
@@ -270,22 +285,50 @@ fn apply_menu(app: &AppHandle, model: &MenuModel) {
             let _ = tray.set_menu(Some(menu));
         }
         let _ = tray.set_tooltip(Some(&model.tooltip));
+        let _ = tray.set_icon(Some(tray_image(&model.badge)));
     }
 }
 
-/// Update the tooltip, leaving the menu alone.
+/// Update the tooltip and icon, leaving the menu alone.
 ///
-/// Safe from any thread at any time: the tooltip is a string on the icon, not
-/// a menu Windows might be displaying. See [`apply_menu`] for why the menu
-/// cannot be touched here.
-fn render_tooltip(app: &AppHandle, state: &Shared) {
-    let tooltip = state.lock().unwrap().view().tooltip;
+/// Safe from any thread at any time: the tooltip and icon live on the
+/// notification-area entry, not on a menu Windows might be displaying. See
+/// [`apply_menu`] for why the menu cannot be touched here.
+fn render_status(app: &AppHandle, state: &Shared) {
+    let model = state.lock().unwrap().view();
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(tray) = handle.tray_by_id("main") {
-            let _ = tray.set_tooltip(Some(&tooltip));
+            let _ = tray.set_tooltip(Some(&model.tooltip));
+            let _ = tray.set_icon(Some(tray_image(&model.badge)));
         }
     });
+}
+
+/// The static logo, or the usage badge drawn at the size the taskbar uses.
+///
+/// Drawn at the system's small-icon size rather than one fixed size: Windows
+/// would otherwise resample the bitmap, and resampling pixel glyphs by a
+/// non-integer factor (32px down to 24px at 150%) smears them.
+fn tray_image(badge: &Badge) -> Image<'static> {
+    let size = small_icon_size();
+    match badge::render(badge, size) {
+        Some(rgba) => Image::new_owned(rgba, size, size),
+        None => tauri::include_image!("icons/tray.png"),
+    }
+}
+
+/// `SM_CXSMICON`: 16 at 100% scaling, 24 at 150%, 32 at 200%.
+fn small_icon_size() -> u32 {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetSystemMetrics(index: i32) -> i32;
+    }
+    const SM_CXSMICON: i32 = 49;
+    // SAFETY: takes an integer, touches no memory of ours.
+    let size = unsafe { GetSystemMetrics(SM_CXSMICON) };
+    // Zero means the call failed; anything outside this range is not a tray.
+    u32::try_from(size).map_or(16, |s| s.clamp(16, 64))
 }
 
 /// Rebuild the menu and tooltip from a background thread.
@@ -374,7 +417,7 @@ fn refresh(app: &AppHandle, state: &Shared, mut menu: MenuUpdate) {
 
         match menu {
             MenuUpdate::Rebuild => render_menu(app, state),
-            MenuUpdate::Skip => render_tooltip(app, state),
+            MenuUpdate::Skip => render_status(app, state),
         }
 
         // Read `pending` AFTER rendering, and clear `busy` in the same lock
@@ -437,7 +480,7 @@ fn on_tray_event(app: &AppHandle, event: TrayIconEvent) {
     // losing the race destroys a live menu, and it would only buy a fresher
     // first paint.
     //
-    // So the click refreshes data and the tooltip. The menu the user is
+    // So the click refreshes data, the tooltip and the icon. The menu the user is
     // reading was built by the last rebuild, and the next one picks up what
     // this fetch found.
     let app = app.clone();
@@ -480,6 +523,18 @@ fn on_menu_event(app: &AppHandle, id: String) {
                 state.lock().unwrap().notice = Some(format!("설치 안내 열기 실패: {err}"));
                 render_menu(&app, &state);
             }
+        }
+        "usage_icon" => {
+            let want = !state.lock().unwrap().usage_icon;
+            // The registry is the source of truth: on a failed write the check
+            // mark stays where it was, as `autostart` does.
+            match claude_swap_bar::settings::set_usage_icon(want) {
+                Ok(()) => state.lock().unwrap().usage_icon = want,
+                Err(err) => {
+                    state.lock().unwrap().notice = Some(format!("아이콘 설정 저장 실패: {err}"))
+                }
+            }
+            render_menu(&app, &state);
         }
         "autostart" => {
             let want = !claude_swap_bar::autostart::is_enabled();
